@@ -1,0 +1,3 @@
+#!/bin/bash
+
+fswatch -0 book public-html src | xargs -0 -n 1 -I {} ./build
