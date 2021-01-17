@@ -1,2 +1,2 @@
 #!/bin/bash
-zig build run
+zig build run && cp -r public-html/* html/

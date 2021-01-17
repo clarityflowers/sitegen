@@ -1,3 +1,6 @@
 originals/
 public/
 .vscode/
+html/
+gmi/
+zig-cache/

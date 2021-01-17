@@ -1,5 +1,6 @@
 const std = @import("std");
 const log = std.log.scoped(.stranger_roads);
+const Date = @import("zig-date/src/main.zig").Date;
 
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -15,36 +16,41 @@ pub fn main() anyerror!void {
         try std.fs.cwd().makePath(fld.name);
     }
 
-    const pages = blk: {
-        const pagefile = try blog_dir.openFile("pages.txt", .{});
-        defer pagefile.close();
-        const pages_reader = pagefile.reader();
-        var page_file_buffer = std.ArrayList(u8).init(&arena.allocator);
-        var pages = std.ArrayList(PageLink).init(&arena.allocator);
-        while (pages_reader.readByte() catch null) |byte| {
-            if (byte == '\n' and page_file_buffer.items.len > 0) {
-                const file = try blog_dir.openFile(
-                    page_file_buffer.items,
-                    .{ .read = true },
-                );
+    const blog_posts = blk: {
+        var iterator = blog_dir.iterate();
+        var pages = std.ArrayList(Page).init(&arena.allocator);
+        while (try iterator.next()) |entry| {
+            if (entry.kind == .File) {
+                const file = try blog_dir.openFile(entry.name, .{});
                 defer file.close();
                 const title = try file.reader().readUntilDelimiterAlloc(
                     &arena.allocator,
                     '\n',
                     256,
                 );
-                try pages.append(PageLink{
+                const reader = file.reader();
+                var buffer: [22]u8 = undefined;
+                const len = try reader.read(&buffer);
+                const writing_dates = parseWritingDates(buffer[0..len]) orelse
+                    return error.NoWritingDates;
+                const filename = try arena.allocator.dupe(u8, entry.name);
+                try pages.append(.{
                     .title = title,
-                    .filename = page_file_buffer.toOwnedSlice(),
+                    .filename = filename,
+                    .created = writing_dates.created,
+                    .updated = writing_dates.updated,
                 });
-            } else {
-                try page_file_buffer.append(byte);
             }
         }
+        std.sort.sort(Page, pages.items, {}, struct {
+            fn updatedLaterThan(context: void, lhs: Page, rhs: Page) bool {
+                return lhs.updated.isAfter(rhs.updated);
+            }
+        }.updatedLaterThan);
         break :blk pages.toOwnedSlice();
     };
 
-    for (pages) |page, page_index| {
+    for (blog_posts) |page, page_index| {
         log.info("Rendering {}", .{page.title});
         const lines = blk: {
             var lines = std.ArrayList([]const u8).init(&arena.allocator);
@@ -76,24 +82,26 @@ pub fn main() anyerror!void {
         );
         inline for (@typeInfo(Ext).Enum.fields) |fld| {
             const out_dir = try cwd.openDir(fld.name, .{});
+            try out_dir.makePath("blog");
+            const blog_out_dir = try out_dir.openDir("blog", .{});
             const out_filename = try std.mem.concat(
                 &arena.allocator,
                 u8,
                 &[_][]const u8{ page.filename, ".", fld.name },
             );
             defer arena.allocator.free(out_filename);
-            const file = try out_dir.createFile(out_filename, .{});
+            const file = try blog_out_dir.createFile(out_filename, .{});
             defer file.close();
             const writer = file.writer();
-            const prev_page = if (page_index == 0) null else pages[page_index - 1];
-            const next_page = if (page_index == pages.len - 1)
+            const prev_page = if (page_index == 0) null else blog_posts[page_index - 1];
+            const next_page = if (page_index == blog_posts.len - 1)
                 null
             else
-                pages[page_index + 1];
+                blog_posts[page_index + 1];
             try formatDoc(
                 doc,
                 writer,
-                pages,
+                blog_posts,
                 prev_page,
                 next_page,
                 @field(Ext, fld.name),
@@ -102,28 +110,37 @@ pub fn main() anyerror!void {
     }
 }
 
+const WritingDates = struct {
+    created: Date,
+    updated: Date,
+};
+
 // ---- MODELS ----
 
 const Document = struct {
-    title: []const u8, blocks: []const Block
+    title: []const u8,
+    blocks: []const Block,
+    created: Date,
+    updated: Date,
 };
 
-const PageLink = struct {
+const Page = struct {
     title: []const u8,
     filename: []const u8,
+    created: Date,
+    updated: Date,
 };
 
 const Block = union(enum) {
     paragraph: []const Span,
     raw: Raw,
-    toc,
     heading: []const u8,
     subheading: []const u8,
     divider,
     examples: []const []const Span,
     list: []const []const Span,
     list_em: []const []const Span,
-    link: Link,
+    links: []const Link,
     unknown_command: []const u8,
 };
 
@@ -173,7 +190,10 @@ fn parseDocument(
     errdefer errarena.deinit();
 
     const title = lines[0];
-    var line: usize = 1;
+    var line: usize = 2;
+
+    const writing_dates = parseWritingDates(lines[1]) orelse
+        return error.NoWritingDates;
 
     var blocks = std.ArrayList(Block).init(&errarena.allocator);
     while (try parseBlock(lines, line, allocator)) |res| {
@@ -183,6 +203,8 @@ fn parseDocument(
     const blocks_slice = blocks.toOwnedSlice();
     const result: Document = .{
         .title = title,
+        .created = writing_dates.created,
+        .updated = writing_dates.updated,
         .blocks = blocks_slice,
     };
     return result;
@@ -206,6 +228,16 @@ fn parseTitle(reader: anytype, allocator: *std.mem.Allocator) ![]const u8 {
     return try reader.readUntilDelimiterAlloc(allocator, '\n', 1024);
 }
 
+fn parseWritingDates(line: []const u8) ?WritingDates {
+    if (line.len < 21) return null;
+    const created = Date.parse(line[0..10]) catch return null;
+    const updated = Date.parse(line[11..21]) catch return null;
+    return WritingDates{
+        .created = created,
+        .updated = updated,
+    };
+}
+
 fn parseBlock(
     lines: []const []const u8,
     l: usize,
@@ -224,14 +256,12 @@ fn parseBlock(
         return ok(Block{ .raw = res.data }, res.new_pos);
     } else if (try parseExamples(lines, line, allocator)) |res| {
         return ok(Block{ .examples = res.data }, res.new_pos);
-    } else if (parseToc(lines[line])) {
-        return ok(Block{ .toc = {} }, line + 1);
     } else if (parseHeading(lines[line])) |heading| {
         return ok(Block{ .heading = heading }, line + 1);
     } else if (parseSubheading(lines[line])) |subheading| {
         return ok(Block{ .subheading = subheading }, line + 1);
-    } else if (parseLink(lines[line])) |link| {
-        return ok(Block{ .link = link }, line + 1);
+    } else if (try parseLinks(lines, line, allocator)) |res| {
+        return ok(Block{ .links = res.data }, res.new_pos);
     } else if (parseDivider(lines[line])) {
         return ok(Block{ .divider = .{} }, line + 1);
     } else if (try parseList(lines, line, allocator, "- ")) |res| {
@@ -313,20 +343,28 @@ fn parseList(
     return ok(@as([]const []const Span, items.toOwnedSlice()), ll);
 }
 
-fn parseLink(line: []const u8) ?Link {
-    if (std.mem.startsWith(u8, line, "=> ")) {
-        return if (std.mem.indexOf(u8, line[3..], " ")) |index|
+fn parseLinks(
+    lines: []const []const u8,
+    start: usize,
+    allocator: *std.mem.Allocator,
+) !?ParseResult([]const Link) {
+    var line = start;
+    var result = std.ArrayList(Link).init(allocator);
+    while (std.mem.startsWith(u8, lines[line], "=> ")) : (line += 1) {
+        const link = if (std.mem.indexOf(u8, lines[line][3..], " ")) |index|
             Link{
-                .url = line[3..index],
-                .text = line[index + 4 ..],
+                .url = lines[line][3..index],
+                .text = lines[line][index + 4 ..],
             }
         else
             Link{
-                .url = line[3..],
+                .url = lines[line][3..],
                 .text = null,
             };
+        try result.append(link);
     }
-    return null;
+    if (result.items.len == 0) return null;
+    return ok(@as([]const Link, result.toOwnedSlice()), line);
 }
 
 fn parseExamples(
@@ -501,14 +539,14 @@ fn parseAnchor(
 fn formatDoc(
     doc: Document,
     writer: anytype,
-    pages: []const PageLink,
-    prev: ?PageLink,
-    next: ?PageLink,
+    pages: []const Page,
+    prev: ?Page,
+    next: ?Page,
     ext: Ext,
 ) !void {
     switch (ext) {
-        .html => return formatHtml(doc, writer, pages, prev, next),
-        .gmi => return formatGmi(doc, writer, pages, prev, next),
+        .html => return formatHtml(doc, writer),
+        .gmi => return formatGmi(doc, writer),
     }
 }
 
@@ -526,9 +564,6 @@ fn formatRoll(roll: Roll, writer: anytype) !void {
 pub fn formatHtml(
     doc: Document,
     writer: anytype,
-    pages: []const PageLink,
-    prev: ?PageLink,
-    next: ?PageLink,
 ) !void {
     try writer.writeAll(
         \\<!DOCTYPE html>
@@ -536,8 +571,7 @@ pub fn formatHtml(
         \\<head>
         \\<meta charset="UTF-8"/>
         \\<meta name="viewport" content="width=device-width, initial-scale=1.0">
-        \\<link rel="stylesheet" type="text/css" href="./webfonts/fonts.css">
-        \\<link rel="stylesheet" type="text/css" href="styles.css" />
+        \\<link rel="stylesheet" type="text/css" href="/style.css" />
         \\<link rel="icon" type="image/png" href="assets/favicon.png" />
         \\
     );
@@ -545,92 +579,41 @@ pub fn formatHtml(
     try writer.writeAll(
         \\</head>
         \\<body>
+        \\<a href="./">blog index</a> 
+        \\<main>
         \\
     );
-    if (prev == null) {
-        try writer.writeAll("<main id=\"toc\">\n");
-    } else {
-        try writer.writeAll("<main>\n");
+    try writer.print(
+        \\<header>
+        \\  <h1>{}</h1>
+        \\
+    , .{doc.title});
+    try writer.print("Written {Month D, YYYY}", .{doc.created});
+    if (!doc.updated.equals(doc.created)) {
+        try writer.print(", updated {Month D, YYYY}", .{doc.updated});
     }
-    if (prev != null) {
-        try writer.print(
-            \\<header>
-            \\  <h1>{0}</h1>
-            \\  <nav>
-            \\
-        , .{doc.title});
-        for (doc.blocks) |block| switch (block) {
-            .heading => |heading| {
-                try writer.writeAll(
-                    \\<a href="#
-                );
-                try formatId(heading, writer);
-                try writer.print(
-                    \\">{}</a>
-                    \\
-                , .{heading});
-            },
-            .divider => {
-                try writer.writeAll("<hr>\n");
-            },
-            else => {},
-        };
-        try writer.writeAll(
-            \\  </nav>
-            \\</header>
-            \\
-        );
-    }
-    for (doc.blocks) |block| try formatBlockHtml(block, writer, pages);
+
+    try writer.writeAll(
+        \\
+        \\</header>
+        \\
+    );
+    for (doc.blocks) |block| try formatBlockHtml(block, writer);
     try writer.writeAll(
         \\</main>
-        \\<footer><nav>
-        \\
-    );
-
-    if (prev) |page|
-        try writer.print(
-            \\  <a href="{}.html">{}</a>
-            \\
-        , .{ page.filename, page.title })
-    else
-        try writer.writeAll("  <div></div>\n");
-
-    try writer.writeAll(
-        \\  <a href=".#Table-of-Contents">TOC</a>
-        \\
-    );
-
-    if (next) |page|
-        try writer.print(
-            \\  <a href="{}.html">{}</a>
-            \\
-        , .{ page.filename, page.title })
-    else
-        try writer.writeAll("  <div></div>\n");
-
-    try writer.writeAll("</nav></footer>\n");
-    if (prev) |page| {
-        try writer.print(
-            \\<a href="{}.html" id="prev-link" aria-label="previous page"></a>
-            \\
-        , .{page.filename});
-    }
-    if (next) |page| {
-        try writer.print(
-            \\<a href="{}.html" id="next-link" aria-label="next page"></a>
-            \\
-        , .{page.filename});
-    }
-    if (prev != null) {
-        try writer.writeAll(
-            \\<a href=".#Table-of-Contents" 
-            \\   id="toc-link" 
-            \\   aria-label="table of contents">Table of Contents</a>
-            \\
-        );
-    }
-    try writer.writeAll(
+        \\<footer>
+        \\<p> 
+        \\  This color palette is 
+        \\  <a href="https://www.colourlovers.com/palette/2598543/Let_Me_Be_Myself_*">
+        \\    Let Me Be Myself *
+        \\  </a>
+        \\  by 
+        \\  <a href="https://www.colourlovers.com/lover/sugar%21">sugar!</a>. 
+        \\  License: 
+        \\  <a href="https://creativecommons.org/licenses/by-nc-sa/3.0/">
+        \\    CC-BY-NC-SA 3.0
+        \\  </a>.
+        \\</p>
         \\</body>
         \\</html>
         \\
@@ -640,7 +623,6 @@ pub fn formatHtml(
 fn formatBlockHtml(
     block: Block,
     writer: anytype,
-    pages: []const PageLink,
 ) @TypeOf(writer).Error!void {
     switch (block) {
         .paragraph => |paragraph| {
@@ -662,16 +644,10 @@ fn formatBlockHtml(
             .html => for (raw.lines) |line| try writer.print("{}\n", .{line}),
             else => {},
         },
-        .link => {},
-        .toc => {
-            try writer.writeAll("<nav>\n");
-            for (pages[1..]) |page| {
-                try writer.print(
-                    \\  <a href="{}.html">{}</a>
-                    \\
-                , .{ page.filename, page.title });
+        .links => |links| {
+            for (links) |link| {
+                try writer.print("<a href=\"{}\">{}</a>\n", .{ link.url, link.text });
             }
-            try writer.writeAll("</nav>\n");
         },
         .divider => {
             try writer.writeAll("<hr/>\n");
@@ -692,7 +668,7 @@ fn formatBlockHtml(
         .examples => |paragraphs| {
             try writer.writeAll("<div class=\"examples\">");
             for (paragraphs) |p| {
-                try formatBlockHtml(Block{ .paragraph = p }, writer, pages);
+                try formatBlockHtml(Block{ .paragraph = p }, writer);
             }
             try writer.writeAll("</div>");
         },
@@ -746,33 +722,19 @@ pub fn formatId(string: []const u8, writer: anytype) !void {
 pub fn formatGmi(
     doc: Document,
     writer: anytype,
-    pages: []const PageLink,
-    prev: ?PageLink,
-    next: ?PageLink,
 ) !void {
     try writer.print(
         \\# {}
         \\
         \\
     , .{doc.title});
-    for (doc.blocks) |block| try formatBlockGmi(block, writer, pages);
+    for (doc.blocks) |block| try formatBlockGmi(block, writer);
     try writer.writeAll("\n");
-    if (next) |page| {
-        try writer.print("=> {}.gmi -> {}\n", .{ page.filename, page.title });
-    }
-    if (prev) |page| {
-        try writer.print(
-            \\=> {}.gmi <- {}
-            \\=> index.gmi Table of Contents
-            \\
-        , .{ page.filename, page.title });
-    }
 }
 
 fn formatBlockGmi(
     block: Block,
     writer: anytype,
-    pages: []const PageLink,
 ) @TypeOf(writer).Error!void {
     switch (block) {
         .paragraph => |paragraph| {
@@ -791,20 +753,15 @@ fn formatBlockGmi(
             },
             else => {},
         },
-        .link => |link| {
-            if (link.text) |text| {
-                try writer.print("=> {} {}\n", .{ link.url, text });
-            } else {
-                try writer.print("=> {}\n", .{link.url});
+        .links => |links| {
+            for (links) |link| {
+                if (link.text) |text| {
+                    try writer.print("=> {} {}\n", .{ link.url, text });
+                } else {
+                    try writer.print("=> {}\n", .{link.url});
+                }
             }
-        },
-        .toc => {
-            for (pages[1..]) |page| {
-                try writer.print(
-                    "=> {}.gmi {}\n",
-                    .{ page.filename, page.title },
-                );
-            }
+            try writer.writeByte('\n');
         },
         .divider => {
             try writer.writeAll(
@@ -826,7 +783,7 @@ fn formatBlockGmi(
         },
         .examples => |paragraphs| {
             for (paragraphs) |p| {
-                try formatBlockGmi(Block{ .paragraph = p }, writer, pages);
+                try formatBlockGmi(Block{ .paragraph = p }, writer);
             }
         },
         .unknown_command => |command| {
