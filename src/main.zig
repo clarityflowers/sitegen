@@ -138,10 +138,13 @@ const Block = union(enum) {
     subheading: []const u8,
     divider,
     examples: []const []const Span,
+    quote: []const []const Span,
     list: []const []const Span,
     list_em: []const []const Span,
     links: []const Link,
     unknown_command: []const u8,
+    image: Link,
+    preformatted: []const []const u8,
 };
 
 const Ext = enum {
@@ -254,12 +257,16 @@ fn parseBlock(
 
     if (parseRaw(lines, line)) |res| {
         return ok(Block{ .raw = res.data }, res.new_pos);
-    } else if (try parseExamples(lines, line, allocator)) |res| {
+    } else if (try parseWrapper(lines, line, "!examples", allocator)) |res| {
         return ok(Block{ .examples = res.data }, res.new_pos);
+    } else if (try parseWrapper(lines, line, "!quote", allocator)) |res| {
+        return ok(Block{ .quote = res.data }, res.new_pos);
     } else if (parseHeading(lines[line])) |heading| {
         return ok(Block{ .heading = heading }, line + 1);
     } else if (parseSubheading(lines[line])) |subheading| {
         return ok(Block{ .subheading = subheading }, line + 1);
+    } else if (parseImage(lines[line])) |image| {
+        return ok(Block{ .image = image }, line + 1);
     } else if (try parseLinks(lines, line, allocator)) |res| {
         return ok(Block{ .links = res.data }, res.new_pos);
     } else if (parseDivider(lines[line])) {
@@ -268,6 +275,8 @@ fn parseBlock(
         return ok(Block{ .list = res.data }, res.new_pos);
     } else if (try parseList(lines, line, allocator, "~ ")) |res| {
         return ok(Block{ .list_em = res.data }, res.new_pos);
+    } else if (try parsePreformatted(lines, line, allocator)) |res| {
+        return ok(Block{ .preformatted = res.data }, res.new_pos);
     } else if (try parseParagraph(lines, line, allocator)) |res| {
         return ok(Block{ .paragraph = res.data }, res.new_pos);
     } else {
@@ -367,12 +376,13 @@ fn parseLinks(
     return ok(@as([]const Link, result.toOwnedSlice()), line);
 }
 
-fn parseExamples(
+fn parseWrapper(
     lines: []const []const u8,
     start: usize,
+    comptime command: []const u8,
     allocator: *std.mem.Allocator,
 ) !?ParseResult([]const []const Span) {
-    if (!std.mem.startsWith(u8, lines[start], "!examples")) return null;
+    if (!std.mem.startsWith(u8, lines[start], command)) return null;
     var line = start + 1;
     var paragraphs = std.ArrayList([]const Span).init(allocator);
     while (try parseParagraph(lines, line, allocator)) |res| {
@@ -380,6 +390,33 @@ fn parseExamples(
         try paragraphs.append(res.data);
     }
     return ok(@as([]const []const Span, paragraphs.toOwnedSlice()), line);
+}
+
+fn parseImage(line: []const u8) ?Link {
+    comptime const prefix = "[img:";
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
+    const text_end = std.mem.indexOf(u8, line, "](") orelse return null;
+    const end = std.mem.indexOf(u8, line[text_end..], ")") orelse return null;
+    return Link{
+        .text = line[prefix.len..text_end],
+        .url = line[text_end + 2 .. text_end + end],
+    };
+}
+
+fn parsePreformatted(
+    lines: []const []const u8,
+    start: usize,
+    allocator: *std.mem.Allocator,
+) !?ParseResult([]const []const u8) {
+    if (!std.mem.startsWith(u8, lines[start], "  ")) return null;
+    var line = start;
+    var result = std.ArrayList([]const u8).init(allocator);
+    while (line < lines.len and
+        std.mem.startsWith(u8, lines[line], "  ")) : (line += 1)
+    {
+        try result.append(lines[line][2..]);
+    }
+    return ok(@as([]const []const u8, result.toOwnedSlice()), line);
 }
 
 fn parseParagraph(
@@ -398,7 +435,8 @@ fn parseParagraph(
             line[0] == '!' or
             std.mem.startsWith(u8, line, "# ") or
             std.mem.startsWith(u8, line, "~ ") or
-            std.mem.startsWith(u8, line, "- "))
+            std.mem.startsWith(u8, line, "- ") or
+            std.mem.startsWith(u8, line, "  "))
         {
             if (index == 0) {
                 return null;
@@ -644,9 +682,23 @@ fn formatBlockHtml(
             .html => for (raw.lines) |line| try writer.print("{}\n", .{line}),
             else => {},
         },
+        .image => |image| {
+            const text = image.text orelse image.url;
+            try writer.print(
+                \\<img src="{}" alt="{}">
+                \\
+            , .{
+                image.url,
+                text,
+            });
+        },
         .links => |links| {
             for (links) |link| {
-                try writer.print("<a href=\"{}\">{}</a>\n", .{ link.url, link.text });
+                const text = link.text orelse link.url;
+                try writer.print("<a href=\"{}\">{}</a>\n", .{
+                    link.url,
+                    link.text,
+                });
             }
         },
         .divider => {
@@ -671,6 +723,20 @@ fn formatBlockHtml(
                 try formatBlockHtml(Block{ .paragraph = p }, writer);
             }
             try writer.writeAll("</div>");
+        },
+        .quote => |paragraphs| {
+            try writer.writeAll("<blockquote>\n");
+            for (paragraphs) |p| {
+                try formatBlockHtml(Block{ .paragraph = p }, writer);
+            }
+            try writer.writeAll("</blockquote>\n");
+        },
+        .preformatted => |lines| {
+            try writer.writeAll("<pre>\n");
+            for (lines) |line| {
+                try writer.print("  {}\n", .{line});
+            }
+            try writer.writeAll("</pre>\n");
         },
         .unknown_command => |command| {
             try writer.print("UNKNOWN COMMAND: {}\n", .{command});
@@ -732,14 +798,26 @@ pub fn formatGmi(
     try writer.writeAll("\n");
 }
 
+fn formatParagraphGmi(
+    spans: []const Span,
+    prefix: []const u8,
+    writer: anytype,
+) !void {
+    try writer.writeAll(prefix);
+    for (spans) |span| {
+        if (span == .br) try writer.writeAll(prefix);
+        try formatSpanGmi(span, writer);
+    }
+    try writer.writeAll("\n\n");
+}
+
 fn formatBlockGmi(
     block: Block,
     writer: anytype,
 ) @TypeOf(writer).Error!void {
     switch (block) {
         .paragraph => |paragraph| {
-            for (paragraph) |span| try formatSpanGmi(span, writer);
-            try writer.writeAll("\n\n");
+            try formatParagraphGmi(paragraph, "", writer);
         },
         .heading => |heading| {
             try writer.print("## {}\n\n", .{heading});
@@ -753,13 +831,20 @@ fn formatBlockGmi(
             },
             else => {},
         },
+        .image => |image| {
+            try writer.print("=> {}", .{image.url});
+            if (image.text) |text| {
+                try writer.print(" {}", .{image.text});
+            }
+            try writer.writeAll("\n");
+        },
         .links => |links| {
             for (links) |link| {
+                try writer.print("=> {}", .{link.url});
                 if (link.text) |text| {
-                    try writer.print("=> {} {}\n", .{ link.url, text });
-                } else {
-                    try writer.print("=> {}\n", .{link.url});
+                    try writer.print(" {}", .{text});
                 }
+                try writer.writeByte('\n');
             }
             try writer.writeByte('\n');
         },
@@ -783,8 +868,20 @@ fn formatBlockGmi(
         },
         .examples => |paragraphs| {
             for (paragraphs) |p| {
-                try formatBlockGmi(Block{ .paragraph = p }, writer);
+                try formatParagraphGmi(p, "", writer);
             }
+        },
+        .quote => |paragraphs| {
+            for (paragraphs) |p| {
+                try formatParagraphGmi(p, "> ", writer);
+            }
+        },
+        .preformatted => |lines| {
+            try writer.writeAll("```\n");
+            for (lines) |line| {
+                try writer.print("{}\n", .{line});
+            }
+            try writer.writeAll("```\n\n");
         },
         .unknown_command => |command| {
             try writer.print("UNKNOWN COMMAND: {}\n", .{command});
