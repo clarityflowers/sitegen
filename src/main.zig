@@ -2,124 +2,188 @@ const std = @import("std");
 const log = std.log.scoped(.stranger_roads);
 const Date = @import("zig-date/src/main.zig").Date;
 
+const Dir = struct {
+    src: []const u8,
+    dest: []const u8,
+};
+
 pub fn main() anyerror!void {
+    log.info("Hello!", .{});
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
-    defer arena.deinit();
+    defer if (gpa.deinit()) log.debug("Detected memory leak.", .{});
 
-    const args = try std.process.argsAlloc(&arena.allocator);
-    defer std.process.argsFree(&arena.allocator, args);
-    const cwd = std.fs.cwd();
-
-    const blog_dir = try cwd.openDir("blog", .{ .iterate = true });
     inline for (@typeInfo(Ext).Enum.fields) |fld| {
         try std.fs.cwd().makePath(fld.name);
     }
 
-    const blog_posts = blk: {
-        var iterator = blog_dir.iterate();
-        var pages = std.ArrayList(Page).init(&arena.allocator);
-        while (try iterator.next()) |entry| {
-            if (entry.kind == .File) {
-                const file = try blog_dir.openFile(entry.name, .{});
-                defer file.close();
-                const title = try file.reader().readUntilDelimiterAlloc(
-                    &arena.allocator,
-                    '\n',
-                    256,
-                );
-                const reader = file.reader();
-                var buffer: [22]u8 = undefined;
-                const len = try reader.read(&buffer);
-                const writing_dates = parseWritingDates(buffer[0..len]) orelse
-                    return error.NoWritingDates;
-                const filename = try arena.allocator.dupe(u8, entry.name);
-                try pages.append(.{
-                    .title = title,
-                    .filename = filename,
-                    .created = writing_dates.created,
-                    .updated = writing_dates.updated,
-                });
-            }
-        }
-        std.sort.sort(Page, pages.items, {}, struct {
-            fn updatedLaterThan(context: void, lhs: Page, rhs: Page) bool {
-                return lhs.updated.isAfter(rhs.updated);
-            }
-        }.updatedLaterThan);
-        break :blk pages.toOwnedSlice();
-    };
+    const cwd = std.fs.cwd();
 
-    for (blog_posts) |page, page_index| {
-        log.info("Rendering {}", .{page.title});
-        const lines = blk: {
-            var lines = std.ArrayList([]const u8).init(&arena.allocator);
-            const file = try blog_dir.openFile(
-                page.filename,
-                .{ .read = true },
-            );
+    {
+        var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
+        defer arena.deinit();
+        var blog_dir = try cwd.openDir("blog", .{ .iterate = true });
+        defer blog_dir.close();
+
+        const files = try getFiles(&blog_dir, &arena.allocator);
+
+        {
+            const blog_index_file = try cwd.createFile("html/blog/index.html", .{
+                .truncate = true,
+            });
+            defer blog_index_file.close();
+            const writer = blog_index_file.writer();
+            try formatBlogIndexHtml(files, writer);
+        }
+        {
+            const blog_index_file = try cwd.createFile("gmi/blog/index.gmi", .{
+                .truncate = true,
+            });
+            defer blog_index_file.close();
+            const writer = blog_index_file.writer();
+            try formatBlogIndexGmi(files, writer);
+        }
+
+        try renderFiles(
+            &blog_dir,
+            files,
+            "blog",
+            "blog index",
+            true,
+            &gpa.allocator,
+        );
+    }
+    {
+        var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
+        defer arena.deinit();
+        var home_dir = try cwd.openDir("home", .{ .iterate = true });
+        defer home_dir.close();
+
+        const files = try getFiles(&home_dir, &arena.allocator);
+
+        try renderFiles(&home_dir, files, ".", null, false, &gpa.allocator);
+    }
+    log.info("Done!", .{});
+}
+
+/// Caller owns the returned files
+fn getFiles(
+    src_dir: *std.fs.Dir,
+    allocator: *std.mem.Allocator,
+) ![]const Page {
+    var iterator = src_dir.iterate();
+    var pages = std.ArrayList(Page).init(allocator);
+    while (try iterator.next()) |entry| {
+        if (entry.kind == .File) {
+            const file = try src_dir.openFile(entry.name, .{});
             defer file.close();
-            var current_line = std.ArrayList(u8).init(&arena.allocator);
+            const title = try file.reader().readUntilDelimiterAlloc(
+                allocator,
+                '\n',
+                256,
+            );
             const reader = file.reader();
-            while (reader.readByte()) |byte| {
-                if (byte == '\n') {
-                    try lines.append(current_line.toOwnedSlice());
-                    current_line = std.ArrayList(u8).init(&arena.allocator);
-                } else {
-                    try current_line.append(byte);
-                }
-            } else |err| switch (err) {
-                error.EndOfStream => {
-                    try lines.append(current_line.toOwnedSlice());
-                },
-                else => |other_err| return other_err,
-            }
-            break :blk lines.toOwnedSlice();
-        };
+            var buffer: [22]u8 = undefined;
+            const len = try reader.read(&buffer);
+            const writing_dates = parseWritingDates(buffer[0..len]) orelse
+                return error.NoWritingDates;
+            const filename = try allocator.dupe(u8, entry.name);
+            try pages.append(.{
+                .title = title,
+                .filename = filename,
+                .created = writing_dates.created,
+                .updated = writing_dates.updated,
+            });
+        }
+    }
+    return pages.toOwnedSlice();
+}
+
+/// All allocated memory is freed before function completes
+fn renderFiles(
+    src_dir: *std.fs.Dir,
+    files: []const Page,
+    out_path: []const u8,
+    back_text: ?[]const u8,
+    include_dates: bool,
+    allocator: *std.mem.Allocator,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    for (files) |file| {
+        const lines = try readLines(
+            src_dir,
+            file.filename,
+            &arena.allocator,
+        );
+        log.info("Rendering {}/{}", .{ out_path, file.filename });
         const doc = try parseDocument(
             lines,
             &arena.allocator,
         );
         inline for (@typeInfo(Ext).Enum.fields) |fld| {
-            const out_dir = try cwd.openDir(fld.name, .{});
-            try out_dir.makePath("blog");
-            const blog_out_dir = try out_dir.openDir("blog", .{});
+            const out_dir = try std.fs.cwd().openDir(fld.name, .{});
+            try out_dir.makePath(out_path);
+            const blog_out_dir = try out_dir.openDir(out_path, .{});
             const out_filename = try std.mem.concat(
                 &arena.allocator,
                 u8,
-                &[_][]const u8{ page.filename, ".", fld.name },
+                &[_][]const u8{ file.filename, ".", fld.name },
             );
             defer arena.allocator.free(out_filename);
-            const file = try blog_out_dir.createFile(out_filename, .{});
-            defer file.close();
-            const writer = file.writer();
-            const prev_page = if (page_index == 0) null else blog_posts[page_index - 1];
-            const next_page = if (page_index == blog_posts.len - 1)
-                null
-            else
-                blog_posts[page_index + 1];
+            const out_file = try blog_out_dir.createFile(out_filename, .{});
+            defer out_file.close();
+            const writer = out_file.writer();
             try formatDoc(
                 doc,
                 writer,
-                blog_posts,
-                prev_page,
-                next_page,
                 @field(Ext, fld.name),
+                back_text,
+                include_dates,
             );
         }
     }
 }
 
-const WritingDates = struct {
-    created: Date,
-    updated: Date,
-};
+/// Caller owns result
+fn readLines(
+    src_dir: *std.fs.Dir,
+    filename: []const u8,
+    allocator: *std.mem.Allocator,
+) ![]const []const u8 {
+    var lines = std.ArrayList([]const u8).init(allocator);
+    const file = try src_dir.openFile(
+        filename,
+        .{ .read = true },
+    );
+    defer file.close();
+    var current_line = std.ArrayList(u8).init(allocator);
+    const reader = file.reader();
+    while (reader.readByte()) |byte| {
+        if (byte == '\n') {
+            try lines.append(current_line.toOwnedSlice());
+            current_line = std.ArrayList(u8).init(allocator);
+        } else {
+            try current_line.append(byte);
+        }
+    } else |err| switch (err) {
+        error.EndOfStream => {
+            try lines.append(current_line.toOwnedSlice());
+        },
+        else => |other_err| return other_err,
+    }
+    return lines.toOwnedSlice();
+}
 
 // ---- MODELS ----
 
 const Document = struct {
     title: []const u8,
     blocks: []const Block,
+    created: Date,
+    updated: Date,
+};
+
+const WritingDates = struct {
     created: Date,
     updated: Date,
 };
@@ -137,13 +201,12 @@ const Block = union(enum) {
     heading: []const u8,
     subheading: []const u8,
     divider,
-    examples: []const []const Span,
     quote: []const []const Span,
     list: []const []const Span,
     list_em: []const []const Span,
     links: []const Link,
     unknown_command: []const u8,
-    image: Link,
+    image: Image,
     preformatted: []const []const u8,
 };
 
@@ -156,6 +219,12 @@ const Raw = struct {
     lines: []const []const u8,
 };
 
+const Image = struct {
+    url: []const u8,
+    text: []const u8,
+    destination: ?[]const u8,
+};
+
 const Link = struct {
     url: []const u8,
     text: ?[]const u8 = null,
@@ -163,8 +232,6 @@ const Link = struct {
 
 const Span = union(enum) {
     text: []const u8,
-    roll: Roll,
-    blank,
     strong: []const Span,
     emphasis: []const Span,
     anchor: Anchor,
@@ -232,9 +299,12 @@ fn parseTitle(reader: anytype, allocator: *std.mem.Allocator) ![]const u8 {
 }
 
 fn parseWritingDates(line: []const u8) ?WritingDates {
-    if (line.len < 21) return null;
+    if (line.len < 10) return null;
     const created = Date.parse(line[0..10]) catch return null;
-    const updated = Date.parse(line[11..21]) catch return null;
+    const updated = if (line.len >= 21)
+        Date.parse(line[11..21]) catch created
+    else
+        created;
     return WritingDates{
         .created = created,
         .updated = updated,
@@ -257,8 +327,6 @@ fn parseBlock(
 
     if (parseRaw(lines, line)) |res| {
         return ok(Block{ .raw = res.data }, res.new_pos);
-    } else if (try parseWrapper(lines, line, "!examples", allocator)) |res| {
-        return ok(Block{ .examples = res.data }, res.new_pos);
     } else if (try parseWrapper(lines, line, "!quote", allocator)) |res| {
         return ok(Block{ .quote = res.data }, res.new_pos);
     } else if (parseHeading(lines[line])) |heading| {
@@ -362,7 +430,7 @@ fn parseLinks(
     while (std.mem.startsWith(u8, lines[line], "=> ")) : (line += 1) {
         const link = if (std.mem.indexOf(u8, lines[line][3..], " ")) |index|
             Link{
-                .url = lines[line][3..index],
+                .url = lines[line][3 .. index + 3],
                 .text = lines[line][index + 4 ..],
             }
         else
@@ -392,15 +460,24 @@ fn parseWrapper(
     return ok(@as([]const []const Span, paragraphs.toOwnedSlice()), line);
 }
 
-fn parseImage(line: []const u8) ?Link {
+fn parseImage(line: []const u8) ?Image {
     comptime const prefix = "[img:";
     if (!std.mem.startsWith(u8, line, prefix)) return null;
     const text_end = std.mem.indexOf(u8, line, "](") orelse return null;
     const end = std.mem.indexOf(u8, line[text_end..], ")") orelse return null;
-    return Link{
-        .text = line[prefix.len..text_end],
-        .url = line[text_end + 2 .. text_end + end],
-    };
+    if (std.mem.indexOf(u8, line[text_end .. text_end + end], "->")) |dest_end| {
+        return Image{
+            .text = line[prefix.len..text_end],
+            .url = line[text_end + 2 .. text_end + dest_end],
+            .destination = line[text_end + dest_end .. text_end + end],
+        };
+    } else {
+        return Image{
+            .text = line[prefix.len..text_end],
+            .url = line[text_end + 2 .. text_end + end],
+            .destination = null,
+        };
+    }
 }
 
 fn parsePreformatted(
@@ -485,14 +562,6 @@ fn parseSpans(
             try spans.append(.{ .text = text.toOwnedSlice() });
             try spans.append(.{ .anchor = result.data });
             col = result.new_pos;
-        } else if (parseRoll(line, col)) |result| {
-            try spans.append(.{ .text = text.toOwnedSlice() });
-            try spans.append(.{ .roll = result.data });
-            col = result.new_pos;
-        } else if (parseBlank(line, col)) |result| {
-            try spans.append(.{ .text = text.toOwnedSlice() });
-            try spans.append(.{ .blank = {} });
-            col = result.new_pos;
         } else {
             try text.append(line[col]);
             col += 1;
@@ -530,27 +599,6 @@ fn parseStrong(
     return ok(result.data, result.new_pos + 1);
 }
 
-fn parseRoll(
-    line: []const u8,
-    start: usize,
-) ?ParseResult(Roll) {
-    if (line[start] != '@') return null;
-    inline for (@typeInfo(Roll).Enum.fields) |fld| {
-        if (std.mem.startsWith(u8, line[start + 1 ..], fld.name)) {
-            return ok(@field(Roll, fld.name), start + fld.name.len + 1);
-        }
-    }
-    return null;
-}
-
-fn parseBlank(
-    line: []const u8,
-    start: usize,
-) ?ParseResult(void) {
-    if (std.mem.startsWith(u8, line[start..], "----")) return ok({}, start + 4);
-    return null;
-}
-
 fn parseAnchor(
     line: []const u8,
     start: usize,
@@ -574,16 +622,26 @@ fn parseAnchor(
 
 // ---- COMMON FORMATTING ----
 
+const html_preamble =
+    \\<!DOCTYPE html>
+    \\<html>
+    \\<head>
+    \\<meta charset="UTF-8"/>
+    \\<meta name="viewport" content="width=device-width, initial-scale=1.0">
+    \\<link rel="stylesheet" type="text/css" href="/style.css" />
+    \\<link rel="icon" type="image/png" href="assets/favicon.png" />
+    \\
+;
+
 fn formatDoc(
     doc: Document,
     writer: anytype,
-    pages: []const Page,
-    prev: ?Page,
-    next: ?Page,
     ext: Ext,
+    back_text: ?[]const u8,
+    include_dates: bool,
 ) !void {
     switch (ext) {
-        .html => return formatHtml(doc, writer),
+        .html => return formatHtml(doc, writer, back_text, include_dates),
         .gmi => return formatGmi(doc, writer),
     }
 }
@@ -602,33 +660,30 @@ fn formatRoll(roll: Roll, writer: anytype) !void {
 pub fn formatHtml(
     doc: Document,
     writer: anytype,
+    back_text: ?[]const u8,
+    include_dates: bool,
 ) !void {
-    try writer.writeAll(
-        \\<!DOCTYPE html>
-        \\<html>
-        \\<head>
-        \\<meta charset="UTF-8"/>
-        \\<meta name="viewport" content="width=device-width, initial-scale=1.0">
-        \\<link rel="stylesheet" type="text/css" href="/style.css" />
-        \\<link rel="icon" type="image/png" href="assets/favicon.png" />
-        \\
-    );
-    try writer.print("<title>{0} | Stranger Roads</title>\n", .{doc.title});
+    try writer.writeAll(html_preamble);
+    try writer.print("<title>{0} ~ Clarity's Blog</title>\n", .{doc.title});
     try writer.writeAll(
         \\</head>
         \\<body>
-        \\<a href="./">blog index</a> 
-        \\<main>
         \\
     );
+    if (back_text) |text| {
+        try writer.print("<a href=\"./\">{}</a>\n", .{text});
+    }
+    try writer.writeAll("<main>\n");
     try writer.print(
         \\<header>
         \\  <h1>{}</h1>
         \\
     , .{doc.title});
-    try writer.print("Written {Month D, YYYY}", .{doc.created});
-    if (!doc.updated.equals(doc.created)) {
-        try writer.print(", updated {Month D, YYYY}", .{doc.updated});
+    if (include_dates) {
+        try writer.print("Written {Month D, YYYY}", .{doc.created});
+        if (!doc.updated.equals(doc.created)) {
+            try writer.print(", updated {Month D, YYYY}", .{doc.updated});
+        }
     }
 
     try writer.writeAll(
@@ -658,6 +713,28 @@ pub fn formatHtml(
     );
 }
 
+fn formatBlogIndexHtml(pages: []const Page, writer: anytype) !void {
+    try writer.writeAll(html_preamble ++
+        \\<title>Clarity's Blog</title>
+        \\</head>
+        \\<a href="../">return home</a>
+        \\<main>
+        \\<header><h1>clarity's blog</h1></header>
+        \\
+    );
+    for (pages) |page| {
+        try writer.print(
+            \\<a href="{}.html">{YYYY/MM/DD} – {}</a>
+            \\
+        , .{ page.filename, page.created, page.title });
+    }
+    try writer.writeAll(
+        \\</main>
+        \\</body>
+        \\</html>
+    );
+}
+
 fn formatBlockHtml(
     block: Block,
     writer: anytype,
@@ -683,14 +760,21 @@ fn formatBlockHtml(
             else => {},
         },
         .image => |image| {
-            const text = image.text orelse image.url;
+            if (image.destination) |dest| {
+                try writer.print(
+                    \\<a class="img" href="{}">
+                , .{dest});
+            }
             try writer.print(
                 \\<img src="{}" alt="{}">
-                \\
             , .{
                 image.url,
-                text,
+                image.text,
             });
+            if (image.destination != null) {
+                try writer.writeAll("</a>");
+            }
+            try writer.writeByte('\n');
         },
         .links => |links| {
             for (links) |link| {
@@ -716,13 +800,6 @@ fn formatBlockHtml(
                 try writer.writeAll("</li>\n");
             }
             try writer.writeAll("</ul>");
-        },
-        .examples => |paragraphs| {
-            try writer.writeAll("<div class=\"examples\">");
-            for (paragraphs) |p| {
-                try formatBlockHtml(Block{ .paragraph = p }, writer);
-            }
-            try writer.writeAll("</div>");
         },
         .quote => |paragraphs| {
             try writer.writeAll("<blockquote>\n");
@@ -766,11 +843,6 @@ fn formatSpanHtml(span: Span, writer: anytype) @TypeOf(writer).Error!void {
             for (anchor.text) |sp| try formatSpanHtml(sp, writer);
             try writer.writeAll("</a>");
         },
-        .roll => |roll| try formatRoll(roll, writer),
-        .blank => try writer.writeAll(
-            \\<span aria-label="blank" class="blank">____</span>
-            \\
-        ),
         .br => try writer.writeAll("<br>\n"),
     }
 }
@@ -795,6 +867,18 @@ pub fn formatGmi(
         \\
     , .{doc.title});
     for (doc.blocks) |block| try formatBlockGmi(block, writer);
+    try writer.writeAll("\n");
+}
+
+fn formatBlogIndexGmi(pages: []const Page, writer: anytype) !void {
+    try writer.writeAll("# Clarity's Blog\n\n");
+    for (pages) |page| {
+        try writer.print("=> {}.gmi {} - {}\n", .{
+            page.filename,
+            page.created,
+            page.title,
+        });
+    }
     try writer.writeAll("\n");
 }
 
@@ -831,13 +915,7 @@ fn formatBlockGmi(
             },
             else => {},
         },
-        .image => |image| {
-            try writer.print("=> {}", .{image.url});
-            if (image.text) |text| {
-                try writer.print(" {}", .{image.text});
-            }
-            try writer.writeAll("\n");
-        },
+        .image => {},
         .links => |links| {
             for (links) |link| {
                 try writer.print("=> {}", .{link.url});
@@ -866,11 +944,6 @@ fn formatBlockGmi(
             }
             try writer.writeAll("\n");
         },
-        .examples => |paragraphs| {
-            for (paragraphs) |p| {
-                try formatParagraphGmi(p, "", writer);
-            }
-        },
         .quote => |paragraphs| {
             for (paragraphs) |p| {
                 try formatParagraphGmi(p, "> ", writer);
@@ -897,8 +970,6 @@ fn formatSpanGmi(span: Span, writer: anytype) @TypeOf(writer).Error!void {
         => |spans| for (spans) |sp| try formatSpanGmi(sp, writer),
         .anchor => |anchor| for (anchor.text) |sp|
             try formatSpanGmi(sp, writer),
-        .roll => |roll| try formatRoll(roll, writer),
-        .blank => try writer.writeAll("________"),
         .br => try writer.writeAll("\n"),
     }
 }
