@@ -26,6 +26,15 @@ pub fn main() anyerror!void {
 
         const files = try getFiles(&blog_dir, &arena.allocator);
 
+        try renderFiles(
+            &blog_dir,
+            files,
+            "blog",
+            "gemlog",
+            "blog index",
+            true,
+            &gpa.allocator,
+        );
         {
             const blog_index_file = try cwd.createFile("html/blog/index.html", .{
                 .truncate = true,
@@ -35,22 +44,16 @@ pub fn main() anyerror!void {
             try formatBlogIndexHtml(files, writer);
         }
         {
-            const blog_index_file = try cwd.createFile("gmi/blog/index.gmi", .{
-                .truncate = true,
-            });
+            const blog_index_file = try cwd.createFile(
+                "gmi/gemlog/index.gmi",
+                .{
+                    .truncate = true,
+                },
+            );
             defer blog_index_file.close();
             const writer = blog_index_file.writer();
             try formatBlogIndexGmi(files, writer);
         }
-
-        try renderFiles(
-            &blog_dir,
-            files,
-            "blog",
-            "blog index",
-            true,
-            &gpa.allocator,
-        );
     }
     {
         var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
@@ -60,7 +63,15 @@ pub fn main() anyerror!void {
 
         const files = try getFiles(&home_dir, &arena.allocator);
 
-        try renderFiles(&home_dir, files, ".", null, false, &gpa.allocator);
+        try renderFiles(
+            &home_dir,
+            files,
+            ".",
+            ".",
+            null,
+            false,
+            &gpa.allocator,
+        );
     }
     log.info("Done!", .{});
 }
@@ -102,7 +113,8 @@ fn getFiles(
 fn renderFiles(
     src_dir: *std.fs.Dir,
     files: []const Page,
-    out_path: []const u8,
+    html_out_path: []const u8,
+    gmi_out_path: []const u8,
     back_text: ?[]const u8,
     include_dates: bool,
     allocator: *std.mem.Allocator,
@@ -115,13 +127,17 @@ fn renderFiles(
             file.filename,
             &arena.allocator,
         );
-        log.info("Rendering {}/{}", .{ out_path, file.filename });
+        log.info("Rendering {}/{}", .{ gmi_out_path, file.filename });
         const doc = try parseDocument(
             lines,
             &arena.allocator,
         );
         inline for (@typeInfo(Ext).Enum.fields) |fld| {
             const out_dir = try std.fs.cwd().openDir(fld.name, .{});
+            const out_path = switch (@field(Ext, fld.name)) {
+                .gmi => gmi_out_path,
+                .html => html_out_path,
+            };
             try out_dir.makePath(out_path);
             const blog_out_dir = try out_dir.openDir(out_path, .{});
             const out_filename = try std.mem.concat(
@@ -176,6 +192,10 @@ fn readLines(
 
 // ---- MODELS ----
 
+const Ext = enum {
+    html, gmi
+};
+
 const Document = struct {
     title: []const u8,
     blocks: []const Block,
@@ -203,15 +223,10 @@ const Block = union(enum) {
     divider,
     quote: []const []const Span,
     list: []const []const Span,
-    list_em: []const []const Span,
     links: []const Link,
     unknown_command: []const u8,
     image: Image,
     preformatted: []const []const u8,
-};
-
-const Ext = enum {
-    html, gmi
 };
 
 const Raw = struct {
@@ -236,10 +251,6 @@ const Span = union(enum) {
     emphasis: []const Span,
     anchor: Anchor,
     br,
-};
-
-const Roll = enum {
-    weak, strong, hit, miss
 };
 
 const Anchor = struct {
@@ -341,8 +352,6 @@ fn parseBlock(
         return ok(Block{ .divider = .{} }, line + 1);
     } else if (try parseList(lines, line, allocator, "- ")) |res| {
         return ok(Block{ .list = res.data }, res.new_pos);
-    } else if (try parseList(lines, line, allocator, "~ ")) |res| {
-        return ok(Block{ .list_em = res.data }, res.new_pos);
     } else if (try parsePreformatted(lines, line, allocator)) |res| {
         return ok(Block{ .preformatted = res.data }, res.new_pos);
     } else if (try parseParagraph(lines, line, allocator)) |res| {
@@ -646,15 +655,6 @@ fn formatDoc(
     }
 }
 
-fn formatRoll(roll: Roll, writer: anytype) !void {
-    try writer.writeAll(switch (roll) {
-        .miss => "On a 3−,",
-        .hit => "On a 4–6,",
-        .strong => "On a 6,",
-        .weak => "On a 4–5,",
-    });
-}
-
 // ---- HTML FORMATTING ----
 
 pub fn formatHtml(
@@ -788,12 +788,8 @@ fn formatBlockHtml(
         .divider => {
             try writer.writeAll("<hr/>\n");
         },
-        .list_em, .list => |list| {
-            if (block == .list_em) {
-                try writer.writeAll("<ul class=\"em\">\n");
-            } else {
-                try writer.writeAll("<ul>\n");
-            }
+        .list => |list| {
+            try writer.writeAll("<ul>\n");
             for (list) |item| {
                 try writer.writeAll("  <li>");
                 for (item) |span| try formatSpanHtml(span, writer);
@@ -871,7 +867,7 @@ pub fn formatGmi(
 }
 
 fn formatBlogIndexGmi(pages: []const Page, writer: anytype) !void {
-    try writer.writeAll("# Clarity's Blog\n\n");
+    try writer.writeAll("# Clarity's Gemlog\n\n");
     for (pages) |page| {
         try writer.print("=> {}.gmi {} - {}\n", .{
             page.filename,
@@ -936,7 +932,7 @@ fn formatBlockGmi(
                 \\
             );
         },
-        .list_em, .list => |list| {
+        .list => |list| {
             for (list) |item| {
                 try writer.writeAll("* ");
                 for (item) |span| try formatSpanGmi(span, writer);
