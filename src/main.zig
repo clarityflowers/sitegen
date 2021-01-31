@@ -127,7 +127,7 @@ fn renderFiles(
             file.filename,
             &arena.allocator,
         );
-        log.info("Rendering {}/{}", .{ gmi_out_path, file.filename });
+        log.info("Rendering {s}/{s}", .{ gmi_out_path, file.filename });
         const doc = try parseDocument(
             lines,
             &arena.allocator,
@@ -277,9 +277,27 @@ fn parseDocument(
         return error.NoWritingDates;
 
     var blocks = std.ArrayList(Block).init(&errarena.allocator);
-    while (try parseBlock(lines, line, allocator)) |res| {
-        line = res.new_pos;
-        try blocks.append(res.data);
+    var spans = std.ArrayList(Span).init(allocator);
+    while (line < lines.len) {
+        if (try parseBlock(lines, line, allocator)) |res| {
+            if (spans.items.len > 0) {
+                try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
+            }
+            try blocks.append(res.data);
+            line = res.new_pos;
+        } else if (spans.items.len > 0 and lines[line].len == 0) {
+            try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
+        } else if (std.mem.eql(u8, lines[line], "!end")) {
+            line += 1;
+        } else if (try parseSpans(lines[line], 0, allocator, null)) |res| {
+            line += 1;
+            if (spans.items.len > 0) {
+                try spans.append(.{ .br = {} });
+            }
+            try spans.appendSlice(res.data);
+        } else {
+            line += 1;
+        }
     }
     const blocks_slice = blocks.toOwnedSlice();
     const result: Document = .{
@@ -322,23 +340,10 @@ fn parseWritingDates(line: []const u8) ?WritingDates {
     };
 }
 
-fn parseBlock(
-    lines: []const []const u8,
-    l: usize,
-    allocator: *std.mem.Allocator,
-) !?ParseResult(Block) {
-    var line = l;
-    while (line < lines.len and
-        (lines[line].len == 0 or
-        std.mem.eql(u8, lines[line], "!end")))
-    {
-        line += 1;
-    }
-    if (line >= lines.len) return null;
-
+fn parseBlock(lines: []const []const u8, line: usize, allocator: *std.mem.Allocator) !?ParseResult(Block) {
     if (parseRaw(lines, line)) |res| {
         return ok(Block{ .raw = res.data }, res.new_pos);
-    } else if (try parseWrapper(lines, line, "!quote", allocator)) |res| {
+    } else if (try parseWrapper(lines, line, "> ", allocator)) |res| {
         return ok(Block{ .quote = res.data }, res.new_pos);
     } else if (parseHeading(lines[line])) |heading| {
         return ok(Block{ .heading = heading }, line + 1);
@@ -354,11 +359,7 @@ fn parseBlock(
         return ok(Block{ .list = res.data }, res.new_pos);
     } else if (try parsePreformatted(lines, line, allocator)) |res| {
         return ok(Block{ .preformatted = res.data }, res.new_pos);
-    } else if (try parseParagraph(lines, line, allocator)) |res| {
-        return ok(Block{ .paragraph = res.data }, res.new_pos);
-    } else {
-        return ok(Block{ .unknown_command = lines[line] }, line + 1);
-    }
+    } else return null;
 }
 
 fn parseToc(line: []const u8) bool {
@@ -456,16 +457,26 @@ fn parseLinks(
 fn parseWrapper(
     lines: []const []const u8,
     start: usize,
-    comptime command: []const u8,
+    comptime prefix: []const u8,
     allocator: *std.mem.Allocator,
 ) !?ParseResult([]const []const Span) {
-    if (!std.mem.startsWith(u8, lines[start], command)) return null;
-    var line = start + 1;
+    if (!std.mem.startsWith(u8, lines[start], prefix)) return null;
+    var line = start;
     var paragraphs = std.ArrayList([]const Span).init(allocator);
-    while (try parseParagraph(lines, line, allocator)) |res| {
-        line = res.new_pos;
-        try paragraphs.append(res.data);
+    var spans = std.ArrayList(Span).init(allocator);
+    while (line < lines.len and std.mem.startsWith(u8, lines[line], prefix)) : (line += 1) {
+        if (lines[line].len == prefix.len) {
+            if (spans.items.len > 0) {
+                try paragraphs.append(spans.toOwnedSlice());
+            }
+        } else if (try parseSpans(lines[line], prefix.len, allocator, null)) |res| {
+            try spans.appendSlice(res.data);
+        }
     }
+    if (spans.items.len > 0) {
+        try paragraphs.append(spans.toOwnedSlice());
+    }
+    log.debug("Line: {}", .{line});
     return ok(@as([]const []const Span, paragraphs.toOwnedSlice()), line);
 }
 
@@ -508,6 +519,7 @@ fn parsePreformatted(
 fn parseParagraph(
     lines: []const []const u8,
     l: usize,
+    prefix: ?[]const u8,
     allocator: *std.mem.Allocator,
 ) !?ParseResult([]const Span) {
     var start = l;
@@ -664,19 +676,19 @@ pub fn formatHtml(
     include_dates: bool,
 ) !void {
     try writer.writeAll(html_preamble);
-    try writer.print("<title>{0} ~ Clarity's Blog</title>\n", .{doc.title});
+    try writer.print("<title>{0s} ~ Clarity's Blog</title>\n", .{doc.title});
     try writer.writeAll(
         \\</head>
         \\<body>
         \\
     );
     if (back_text) |text| {
-        try writer.print("<a href=\"./\">{}</a>\n", .{text});
+        try writer.print("<a href=\"./\">{s}</a>\n", .{text});
     }
     try writer.writeAll("<main>\n");
     try writer.print(
         \\<header>
-        \\  <h1>{}</h1>
+        \\  <h1>{s}</h1>
         \\
     , .{doc.title});
     if (include_dates) {
@@ -724,7 +736,7 @@ fn formatBlogIndexHtml(pages: []const Page, writer: anytype) !void {
     );
     for (pages) |page| {
         try writer.print(
-            \\<a href="{}.html">{YYYY/MM/DD} – {}</a>
+            \\<a href="{s}.html">{YYYY/MM/DD} – {s}</a>
             \\
         , .{ page.filename, page.created, page.title });
     }
@@ -748,25 +760,25 @@ fn formatBlockHtml(
         .heading => |heading| {
             try writer.writeAll("<h2 id=\"");
             try formatId(heading, writer);
-            try writer.print("\">{}</h2>\n", .{heading});
+            try writer.print("\">{s}</h2>\n", .{heading});
         },
         .subheading => |subheading| {
             try writer.writeAll("<h3 id=\"");
             try formatId(subheading, writer);
-            try writer.print("\">{}</h2>\n", .{subheading});
+            try writer.print("\">{s}</h2>\n", .{subheading});
         },
         .raw => |raw| switch (raw.ext) {
-            .html => for (raw.lines) |line| try writer.print("{}\n", .{line}),
+            .html => for (raw.lines) |line| try writer.print("{s}\n", .{line}),
             else => {},
         },
         .image => |image| {
             if (image.destination) |dest| {
                 try writer.print(
-                    \\<a class="img" href="{}">
+                    \\<a class="img" href="{s}">
                 , .{dest});
             }
             try writer.print(
-                \\<img src="{}" alt="{}">
+                \\<img src="{s}" alt="{s}">
             , .{
                 image.url,
                 image.text,
@@ -779,7 +791,7 @@ fn formatBlockHtml(
         .links => |links| {
             for (links) |link| {
                 const text = link.text orelse link.url;
-                try writer.print("<a href=\"{}\">{}</a>\n", .{
+                try writer.print("<a href=\"{s}\">{s}</a>\n", .{
                     link.url,
                     link.text,
                 });
@@ -807,12 +819,12 @@ fn formatBlockHtml(
         .preformatted => |lines| {
             try writer.writeAll("<pre>\n");
             for (lines) |line| {
-                try writer.print("  {}\n", .{line});
+                try writer.print("  {s}\n", .{line});
             }
             try writer.writeAll("</pre>\n");
         },
         .unknown_command => |command| {
-            try writer.print("UNKNOWN COMMAND: {}\n", .{command});
+            try writer.print("UNKNOWN COMMAND: {s}\n", .{command});
         },
     }
 }
@@ -834,7 +846,7 @@ fn formatSpanHtml(span: Span, writer: anytype) @TypeOf(writer).Error!void {
         },
         .anchor => |anchor| {
             try writer.print(
-                \\<a href="{}">
+                \\<a href="{s}">
             , .{anchor.url});
             for (anchor.text) |sp| try formatSpanHtml(sp, writer);
             try writer.writeAll("</a>");
@@ -858,7 +870,7 @@ pub fn formatGmi(
     writer: anytype,
 ) !void {
     try writer.print(
-        \\# {}
+        \\# {s}
         \\
         \\
     , .{doc.title});
@@ -869,7 +881,7 @@ pub fn formatGmi(
 fn formatBlogIndexGmi(pages: []const Page, writer: anytype) !void {
     try writer.writeAll("# Clarity's Gemlog\n\n");
     for (pages) |page| {
-        try writer.print("=> {}.gmi {} - {}\n", .{
+        try writer.print("=> {s}.gmi {} - {s}\n", .{
             page.filename,
             page.created,
             page.title,
@@ -900,23 +912,23 @@ fn formatBlockGmi(
             try formatParagraphGmi(paragraph, "", writer);
         },
         .heading => |heading| {
-            try writer.print("## {}\n\n", .{heading});
+            try writer.print("## {s}\n\n", .{heading});
         },
         .subheading => |subheading| {
-            try writer.print("### {}\n\n", .{subheading});
+            try writer.print("### {s}\n\n", .{subheading});
         },
         .raw => |raw| switch (raw.ext) {
             .gmi => for (raw.lines) |line| {
-                try writer.print("{}\n", .{line});
+                try writer.print("{s}\n", .{line});
             },
             else => {},
         },
         .image => {},
         .links => |links| {
             for (links) |link| {
-                try writer.print("=> {}", .{link.url});
+                try writer.print("=> {s}", .{link.url});
                 if (link.text) |text| {
-                    try writer.print(" {}", .{text});
+                    try writer.print(" {s}", .{text});
                 }
                 try writer.writeByte('\n');
             }
@@ -948,12 +960,12 @@ fn formatBlockGmi(
         .preformatted => |lines| {
             try writer.writeAll("```\n");
             for (lines) |line| {
-                try writer.print("{}\n", .{line});
+                try writer.print("{s}\n", .{line});
             }
             try writer.writeAll("```\n\n");
         },
         .unknown_command => |command| {
-            try writer.print("UNKNOWN COMMAND: {}\n", .{command});
+            try writer.print("UNKNOWN COMMAND: {s}\n", .{command});
         },
     }
 }

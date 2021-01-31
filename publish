@@ -1,9 +1,7 @@
 #!/bin/bash
 
 sh ./build && \
-  scp html/*.{html,css} \
-    web@clarity.flowers:/srv/www/clarity.flowers/stranger-roads/ &&\
-  if [[ $1 == all ]]; then
-    scp -r html/webfonts html/assets \
-      web@clarity.flowers:/srv/www/clarity.flowers/stranger-roads/;
-  fi
+scp -r html/* \
+  web@clarity.flowers:/srv/www/clarity.flowers/ &&\
+scp -r gmi/* \
+  web@clarity.flowers:/srv/gemini/clarity.flowers/
