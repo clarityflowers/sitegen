@@ -341,8 +341,10 @@ fn parseWritingDates(line: []const u8) ?WritingDates {
 }
 
 fn parseBlock(lines: []const []const u8, line: usize, allocator: *std.mem.Allocator) !?ParseResult(Block) {
-    if (parseRaw(lines, line)) |res| {
+    if (try parseRaw(lines, line, allocator)) |res| {
         return ok(Block{ .raw = res.data }, res.new_pos);
+    } else if (try parsePrefixedLines(lines, line, " ", allocator)) |res| {
+        return ok(Block{ .preformatted = res.data }, res.new_pos);
     } else if (try parseWrapper(lines, line, "> ", allocator)) |res| {
         return ok(Block{ .quote = res.data }, res.new_pos);
     } else if (parseHeading(lines[line])) |heading| {
@@ -357,37 +359,42 @@ fn parseBlock(lines: []const []const u8, line: usize, allocator: *std.mem.Alloca
         return ok(Block{ .divider = .{} }, line + 1);
     } else if (try parseList(lines, line, allocator, "- ")) |res| {
         return ok(Block{ .list = res.data }, res.new_pos);
-    } else if (try parsePreformatted(lines, line, allocator)) |res| {
-        return ok(Block{ .preformatted = res.data }, res.new_pos);
     } else return null;
+}
+
+fn parseRaw(lines: []const []const u8, start: usize, allocator: *std.mem.Allocator) !?ParseResult(Raw) {
+    inline for (@typeInfo(Ext).Enum.fields) |fld| {
+        if (try parsePrefixedLines(lines, start, "." ++ fld.name, allocator)) |res| {
+            return ok(
+                Raw{ .ext = @field(Ext, fld.name), .lines = res.data },
+                res.new_pos,
+            );
+        }
+    }
+    return null;
+}
+
+fn parsePrefixedLines(
+    lines: []const []const u8,
+    start: usize,
+    comptime prefix: []const u8,
+    allocator: *std.mem.Allocator,
+) !?ParseResult([]const []const u8) {
+    if (!std.mem.startsWith(u8, lines[start], prefix ++ " ")) return null;
+    var line = start;
+    var result = std.ArrayList([]const u8).init(allocator);
+    while (line < lines.len and std.mem.startsWith(
+        u8,
+        lines[line],
+        prefix ++ " ",
+    )) : (line += 1) {
+        try result.append(lines[line][prefix.len + 1 ..]);
+    }
+    return ok(@as([]const []const u8, result.toOwnedSlice()), line);
 }
 
 fn parseToc(line: []const u8) bool {
     return std.mem.eql(u8, line, "!toc");
-}
-
-fn parseRaw(lines: []const []const u8, ll: usize) ?ParseResult(Raw) {
-    const ext = loop: inline for (@typeInfo(Ext).Enum.fields) |field| {
-        if (std.mem.eql(u8, lines[ll], "!" ++ field.name)) {
-            break :loop @field(Ext, field.name);
-        }
-    } else return null;
-
-    var end: usize = ll + 1;
-    while (end < lines.len) : (end += 1) {
-        const line = lines[end];
-        if (std.mem.startsWith(u8, line, "!")) {
-            break;
-        }
-    }
-
-    return ok(
-        Raw{
-            .ext = ext,
-            .lines = lines[ll + 1 .. end],
-        },
-        end,
-    );
 }
 
 fn parseDivider(line: []const u8) bool {
@@ -499,23 +506,6 @@ fn parseImage(line: []const u8) ?Image {
         };
     }
 }
-
-fn parsePreformatted(
-    lines: []const []const u8,
-    start: usize,
-    allocator: *std.mem.Allocator,
-) !?ParseResult([]const []const u8) {
-    if (!std.mem.startsWith(u8, lines[start], "  ")) return null;
-    var line = start;
-    var result = std.ArrayList([]const u8).init(allocator);
-    while (line < lines.len and
-        std.mem.startsWith(u8, lines[line], "  ")) : (line += 1)
-    {
-        try result.append(lines[line][2..]);
-    }
-    return ok(@as([]const []const u8, result.toOwnedSlice()), line);
-}
-
 fn parseParagraph(
     lines: []const []const u8,
     l: usize,
