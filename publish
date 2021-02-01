@@ -1,7 +1,15 @@
 #!/bin/bash
 
+if [[ $1 == 'assets' ]]; then
+  HTML_PATHS="html/media/* html/*.woff";
+  GMI_PATHS="gmi/media/*";
+else
+  HTML_PATHS="html/blog/*.html html/wiki/*.html html/*.html html/style.css"
+  GMI_PATHS="gmi/gemlog/*.gmi gmi/wiki/*.gmi gmi/*.gmi"
+fi
+
 sh ./build && \
-scp -r html/* \
+scp $HTML_PATHS \
   web@clarity.flowers:/srv/www/clarity.flowers/ &&\
-scp -r gmi/* \
+scp $GMI_PATHS \
   web@clarity.flowers:/srv/gemini/clarity.flowers/

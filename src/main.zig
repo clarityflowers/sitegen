@@ -548,6 +548,9 @@ fn parseWrapper(
                 try paragraphs.append(spans.toOwnedSlice());
             }
         } else if (try parseSpans(lines[line], prefix.len, allocator, null)) |res| {
+            if (spans.items.len > 0) {
+                try spans.append(.br);
+            }
             try spans.appendSlice(res.data);
         }
     }
