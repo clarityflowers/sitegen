@@ -8,3 +8,5 @@ wiki/
 home/
 blog/
 public/
+public-html/*
+!public-html/style.css
