@@ -7,6 +7,8 @@ const Dir = struct {
     dest: []const u8,
 };
 
+var include_private = false;
+
 pub fn main() anyerror!void {
     log.info("Hello!", .{});
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -16,6 +18,12 @@ pub fn main() anyerror!void {
         try std.fs.cwd().makePath(fld.name);
     }
 
+    const args = try std.process.argsAlloc(&gpa.allocator);
+    defer std.process.argsFree(&gpa.allocator, args);
+
+    include_private = args.len > 1 and
+        (std.mem.eql(u8, args[1], "-p") or std.mem.eql(u8, args[1], "--private"));
+
     const cwd = std.fs.cwd();
 
     {
@@ -24,7 +32,7 @@ pub fn main() anyerror!void {
         var blog_dir = try cwd.openDir("blog", .{ .iterate = true });
         defer blog_dir.close();
 
-        const files = try getFiles(&blog_dir, &arena.allocator, false);
+        const files = try getFiles(&blog_dir, &arena.allocator);
 
         try renderFiles(
             &blog_dir,
@@ -61,7 +69,7 @@ pub fn main() anyerror!void {
         var home_dir = try cwd.openDir("home", .{ .iterate = true });
         defer home_dir.close();
 
-        const files = try getFiles(&home_dir, &arena.allocator, false);
+        const files = try getFiles(&home_dir, &arena.allocator);
 
         try renderFiles(
             &home_dir,
@@ -79,7 +87,7 @@ pub fn main() anyerror!void {
         var wiki_dir = try cwd.openDir("wiki", .{ .iterate = true });
         defer wiki_dir.close();
 
-        const files = try getFiles(&wiki_dir, &arena.allocator, false);
+        const files = try getFiles(&wiki_dir, &arena.allocator);
 
         try renderFiles(
             &wiki_dir,
@@ -98,7 +106,6 @@ pub fn main() anyerror!void {
 fn getFiles(
     src_dir: *std.fs.Dir,
     allocator: *std.mem.Allocator,
-    include_private: bool,
 ) ![]const Page {
     var iterator = src_dir.iterate();
     var pages = std.ArrayList(Page).init(allocator);
@@ -203,14 +210,29 @@ fn readLines(
     const reader = file.reader();
     while (reader.readByte()) |byte| {
         if (byte == '\n') {
-            try lines.append(current_line.toOwnedSlice());
-            current_line = std.ArrayList(u8).init(allocator);
+            if (std.mem.startsWith(u8, current_line.items, "; ")) {
+                if (include_private) {
+                    try lines.append(current_line.toOwnedSlice()[2..]);
+                } else {
+                    current_line.shrinkRetainingCapacity(0);
+                }
+            } else {
+                try lines.append(current_line.toOwnedSlice());
+            }
         } else {
             try current_line.append(byte);
         }
     } else |err| switch (err) {
         error.EndOfStream => {
-            try lines.append(current_line.toOwnedSlice());
+            if (std.mem.startsWith(u8, current_line.items, "; ")) {
+                if (include_private) {
+                    try lines.append(current_line.toOwnedSlice()[2..]);
+                } else {
+                    current_line.deinit();
+                }
+            } else {
+                try lines.append(current_line.toOwnedSlice());
+            }
         },
         else => |other_err| return other_err,
     }
@@ -253,6 +275,7 @@ const Block = union(enum) {
     unknown_command: []const u8,
     image: Image,
     preformatted: []const []const u8,
+    nothing,
 };
 
 const Raw = struct {
@@ -299,39 +322,44 @@ fn parseDocument(
 
     const info_res = try parseInfo(lines);
 
-    var line = info_res.new_pos;
-
-    var blocks = std.ArrayList(Block).init(&errarena.allocator);
+    var index = info_res.new_pos;
+    var blocks = std.ArrayList(Block).init(allocator);
     var spans = std.ArrayList(Span).init(allocator);
-    while (line < lines.len) {
-        if (try parseBlock(lines, line, allocator)) |res| {
+    while (index < lines.len) {
+        if (try parseBlock(lines, index, allocator)) |res| {
             if (spans.items.len > 0) {
                 try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
             }
             try blocks.append(res.data);
-            line = res.new_pos;
-        } else if (spans.items.len > 0 and lines[line].len == 0) {
+            index = res.new_pos;
+        } else if (spans.items.len > 0 and lines[index].len == 0) {
             try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
-        } else if (std.mem.eql(u8, lines[line], "!end")) {
-            line += 1;
-        } else if (try parseSpans(lines[line], 0, allocator, null)) |res| {
-            line += 1;
+            index += 1;
+        } else if (std.mem.eql(u8, lines[index], "!end")) {
+            index += 1;
+        } else if (try parseSpans(lines[index], 0, allocator, null)) |res| {
+            index += 1;
             if (spans.items.len > 0) {
                 try spans.append(.{ .br = {} });
             }
             try spans.appendSlice(res.data);
         } else {
-            line += 1;
+            index += 1;
         }
     }
-    const blocks_slice = blocks.toOwnedSlice();
+    if (spans.items.len > 0) {
+        try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
+    }
+
     const result: Document = .{
-        .blocks = blocks_slice,
+        .blocks = blocks.toOwnedSlice(),
         .info = info_res.data,
         .filename = filename,
     };
     return result;
 }
+
+const ParseError = error{OutOfMemory};
 
 fn ParseResult(comptime Type: type) type {
     return struct {
@@ -862,6 +890,7 @@ fn formatBlockHtml(
         .unknown_command => |command| {
             try writer.print("UNKNOWN COMMAND: {s}\n", .{command});
         },
+        .nothing => {},
     }
 }
 
@@ -1007,6 +1036,7 @@ fn formatBlockGmi(
         .unknown_command => |command| {
             try writer.print("UNKNOWN COMMAND: {s}\n", .{command});
         },
+        .nothing => {},
     }
 }
 
