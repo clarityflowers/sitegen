@@ -24,7 +24,7 @@ pub fn main() anyerror!void {
         var blog_dir = try cwd.openDir("blog", .{ .iterate = true });
         defer blog_dir.close();
 
-        const files = try getFiles(&blog_dir, &arena.allocator);
+        const files = try getFiles(&blog_dir, &arena.allocator, false);
 
         try renderFiles(
             &blog_dir,
@@ -61,7 +61,7 @@ pub fn main() anyerror!void {
         var home_dir = try cwd.openDir("home", .{ .iterate = true });
         defer home_dir.close();
 
-        const files = try getFiles(&home_dir, &arena.allocator);
+        const files = try getFiles(&home_dir, &arena.allocator, false);
 
         try renderFiles(
             &home_dir,
@@ -73,6 +73,24 @@ pub fn main() anyerror!void {
             &gpa.allocator,
         );
     }
+    {
+        var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
+        defer arena.deinit();
+        var wiki_dir = try cwd.openDir("wiki", .{ .iterate = true });
+        defer wiki_dir.close();
+
+        const files = try getFiles(&wiki_dir, &arena.allocator, false);
+
+        try renderFiles(
+            &wiki_dir,
+            files,
+            "wiki",
+            "wiki",
+            "wiki index",
+            false,
+            &gpa.allocator,
+        );
+    }
     log.info("Done!", .{});
 }
 
@@ -80,6 +98,7 @@ pub fn main() anyerror!void {
 fn getFiles(
     src_dir: *std.fs.Dir,
     allocator: *std.mem.Allocator,
+    include_private: bool,
 ) ![]const Page {
     var iterator = src_dir.iterate();
     var pages = std.ArrayList(Page).init(allocator);
@@ -99,7 +118,12 @@ fn getFiles(
                     if (line.items.len == 0) break;
                     try lines.append(line.toOwnedSlice());
                 }
-                break :blk (try parseInfo(lines.items)).data;
+                const res = try parseInfo(lines.items);
+                if (!include_private and res.data.private) {
+                    lines.deinit();
+                    continue;
+                }
+                break :blk res.data;
             };
             const filename = try allocator.dupe(u8, entry.name);
             try pages.append(.{
@@ -132,6 +156,7 @@ fn renderFiles(
         log.info("Rendering {s}/{s}", .{ gmi_out_path, file.filename });
         const doc = try parseDocument(
             lines,
+            file.filename,
             &arena.allocator,
         );
         inline for (@typeInfo(Ext).Enum.fields) |fld| {
@@ -200,6 +225,7 @@ const Ext = enum {
 
 const Document = struct {
     blocks: []const Block,
+    filename: []const u8,
     info: Info,
 };
 
@@ -207,6 +233,7 @@ const Info = struct {
     title: []const u8,
     created: Date,
     updated: ?Date = null,
+    private: bool = false,
 };
 
 const Page = struct {
@@ -261,6 +288,7 @@ const Anchor = struct {
 
 fn parseDocument(
     lines: []const []const u8,
+    filename: []const u8,
     allocator: *std.mem.Allocator,
 ) !Document {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -300,6 +328,7 @@ fn parseDocument(
     const result: Document = .{
         .blocks = blocks_slice,
         .info = info_res.data,
+        .filename = filename,
     };
     return result;
 }
@@ -330,11 +359,14 @@ fn parseInfo(lines: []const []const u8) !ParseResult(Info) {
     var created: ?Date = null;
     var updated: ?Date = null;
     var line: usize = 1;
+    var private = false;
     while (line < lines.len and lines[line].len > 0) : (line += 1) {
         if (std.mem.startsWith(u8, lines[line], created_prefix ++ " ")) {
             created = try Date.parse(lines[line][created_prefix.len + 1 ..]);
         } else if (std.mem.startsWith(u8, lines[line], updated_prefix ++ " ")) {
             updated = try Date.parse(lines[line][updated_prefix.len + 1 ..]);
+        } else if (std.mem.eql(u8, lines[line], "Private")) {
+            private = true;
         } else {
             log.alert("Could not parse info on line {}:", .{line});
             log.alert("{s}", .{lines[line]});
@@ -345,6 +377,7 @@ fn parseInfo(lines: []const []const u8) !ParseResult(Info) {
         .title = title,
         .created = created orelse return error.NoCreatedDate,
         .updated = updated,
+        .private = private,
     }, line);
 }
 
@@ -452,7 +485,9 @@ fn parseLinks(
 ) !?ParseResult([]const Link) {
     var line = start;
     var result = std.ArrayList(Link).init(allocator);
-    while (std.mem.startsWith(u8, lines[line], "=> ")) : (line += 1) {
+    while (line < lines.len and
+        std.mem.startsWith(u8, lines[line], "=> ")) : (line += 1)
+    {
         const link = if (std.mem.indexOf(u8, lines[line][3..], " ")) |index|
             Link{
                 .url = lines[line][3 .. index + 3],
@@ -491,7 +526,6 @@ fn parseWrapper(
     if (spans.items.len > 0) {
         try paragraphs.append(spans.toOwnedSlice());
     }
-    log.debug("Line: {}", .{line});
     return ok(@as([]const []const Span, paragraphs.toOwnedSlice()), line);
 }
 
@@ -681,7 +715,11 @@ pub fn formatHtml(
         \\
     );
     if (back_text) |text| {
-        try writer.print("<a href=\"./\">{s}</a>\n", .{text});
+        if (std.mem.eql(u8, doc.filename, "index")) {
+            try writer.writeAll("<a href=\"..\">return home</a>");
+        } else {
+            try writer.print("<a href=\"./\">{s}</a>\n", .{text});
+        }
     }
     try writer.writeAll("<main>\n");
     try writer.print(
