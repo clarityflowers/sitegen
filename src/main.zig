@@ -1,5 +1,5 @@
 const std = @import("std");
-const log = std.log.scoped(.stranger_roads);
+const log = std.log.scoped(.website);
 const Date = @import("zig-date/src/main.zig").Date;
 
 const Dir = struct {
@@ -87,22 +87,24 @@ fn getFiles(
         if (entry.kind == .File) {
             const file = try src_dir.openFile(entry.name, .{});
             defer file.close();
-            const title = try file.reader().readUntilDelimiterAlloc(
-                allocator,
-                '\n',
-                256,
-            );
-            const reader = file.reader();
-            var buffer: [22]u8 = undefined;
-            const len = try reader.read(&buffer);
-            const writing_dates = parseWritingDates(buffer[0..len]) orelse
-                return error.NoWritingDates;
+            const info = blk: {
+                var lines = std.ArrayList([]const u8).init(allocator);
+                var line = std.ArrayList(u8).init(allocator);
+                while (true) {
+                    try file.reader().readUntilDelimiterArrayList(
+                        &line,
+                        '\n',
+                        256,
+                    );
+                    if (line.items.len == 0) break;
+                    try lines.append(line.toOwnedSlice());
+                }
+                break :blk (try parseInfo(lines.items)).data;
+            };
             const filename = try allocator.dupe(u8, entry.name);
             try pages.append(.{
-                .title = title,
                 .filename = filename,
-                .created = writing_dates.created,
-                .updated = writing_dates.updated,
+                .info = info,
             });
         }
     }
@@ -197,22 +199,19 @@ const Ext = enum {
 };
 
 const Document = struct {
-    title: []const u8,
     blocks: []const Block,
-    created: Date,
-    updated: Date,
+    info: Info,
 };
 
-const WritingDates = struct {
+const Info = struct {
+    title: []const u8,
     created: Date,
-    updated: Date,
+    updated: ?Date = null,
 };
 
 const Page = struct {
-    title: []const u8,
     filename: []const u8,
-    created: Date,
-    updated: Date,
+    info: Info,
 };
 
 const Block = union(enum) {
@@ -270,11 +269,9 @@ fn parseDocument(
     var errarena = std.heap.ArenaAllocator.init(allocator);
     errdefer errarena.deinit();
 
-    const title = lines[0];
-    var line: usize = 2;
+    const info_res = try parseInfo(lines);
 
-    const writing_dates = parseWritingDates(lines[1]) orelse
-        return error.NoWritingDates;
+    var line = info_res.new_pos;
 
     var blocks = std.ArrayList(Block).init(&errarena.allocator);
     var spans = std.ArrayList(Span).init(allocator);
@@ -301,10 +298,8 @@ fn parseDocument(
     }
     const blocks_slice = blocks.toOwnedSlice();
     const result: Document = .{
-        .title = title,
-        .created = writing_dates.created,
-        .updated = writing_dates.updated,
         .blocks = blocks_slice,
+        .info = info_res.data,
     };
     return result;
 }
@@ -327,17 +322,30 @@ fn parseTitle(reader: anytype, allocator: *std.mem.Allocator) ![]const u8 {
     return try reader.readUntilDelimiterAlloc(allocator, '\n', 1024);
 }
 
-fn parseWritingDates(line: []const u8) ?WritingDates {
-    if (line.len < 10) return null;
-    const created = Date.parse(line[0..10]) catch return null;
-    const updated = if (line.len >= 21)
-        Date.parse(line[11..21]) catch created
-    else
-        created;
-    return WritingDates{
-        .created = created,
+fn parseInfo(lines: []const []const u8) !ParseResult(Info) {
+    comptime const created_prefix = "Written";
+    comptime const updated_prefix = "Updated";
+    if (lines.len == 0) return error.NoInfo;
+    const title = lines[0];
+    var created: ?Date = null;
+    var updated: ?Date = null;
+    var line: usize = 1;
+    while (line < lines.len and lines[line].len > 0) : (line += 1) {
+        if (std.mem.startsWith(u8, lines[line], created_prefix ++ " ")) {
+            created = try Date.parse(lines[line][created_prefix.len + 1 ..]);
+        } else if (std.mem.startsWith(u8, lines[line], updated_prefix ++ " ")) {
+            updated = try Date.parse(lines[line][updated_prefix.len + 1 ..]);
+        } else {
+            log.alert("Could not parse info on line {}:", .{line});
+            log.alert("{s}", .{lines[line]});
+            return error.UnexpectedInfo;
+        }
+    }
+    return ok(Info{
+        .title = title,
+        .created = created orelse return error.NoCreatedDate,
         .updated = updated,
-    };
+    }, line);
 }
 
 fn parseBlock(lines: []const []const u8, line: usize, allocator: *std.mem.Allocator) !?ParseResult(Block) {
@@ -653,7 +661,7 @@ fn formatDoc(
 ) !void {
     switch (ext) {
         .html => return formatHtml(doc, writer, back_text, include_dates),
-        .gmi => return formatGmi(doc, writer),
+        .gmi => return formatGmi(doc, writer, include_dates),
     }
 }
 
@@ -666,7 +674,7 @@ pub fn formatHtml(
     include_dates: bool,
 ) !void {
     try writer.writeAll(html_preamble);
-    try writer.print("<title>{0s} ~ Clarity's Blog</title>\n", .{doc.title});
+    try writer.print("<title>{0s} ~ Clarity's Blog</title>\n", .{doc.info.title});
     try writer.writeAll(
         \\</head>
         \\<body>
@@ -680,11 +688,11 @@ pub fn formatHtml(
         \\<header>
         \\  <h1>{s}</h1>
         \\
-    , .{doc.title});
+    , .{doc.info.title});
     if (include_dates) {
-        try writer.print("Written {Month D, YYYY}", .{doc.created});
-        if (!doc.updated.equals(doc.created)) {
-            try writer.print(", updated {Month D, YYYY}", .{doc.updated});
+        try writer.print("Written {Month D, YYYY}", .{doc.info.created});
+        if (doc.info.updated) |updated| {
+            try writer.print(", updated {Month D, YYYY}", .{updated});
         }
     }
 
@@ -728,7 +736,7 @@ fn formatBlogIndexHtml(pages: []const Page, writer: anytype) !void {
         try writer.print(
             \\<a href="{s}.html">{YYYY/MM/DD} – {s}</a>
             \\
-        , .{ page.filename, page.created, page.title });
+        , .{ page.filename, page.info.created, page.info.title });
     }
     try writer.writeAll(
         \\</main>
@@ -858,12 +866,16 @@ pub fn formatId(string: []const u8, writer: anytype) !void {
 pub fn formatGmi(
     doc: Document,
     writer: anytype,
+    include_writing_dates: bool,
 ) !void {
-    try writer.print(
-        \\# {s}
-        \\
-        \\
-    , .{doc.title});
+    try writer.print("# {s}\n", .{doc.info.title});
+    if (include_writing_dates) {
+        try writer.print("Written {Month D, YYYY}", .{doc.info.created});
+        if (doc.info.updated) |updated| {
+            try writer.print(", updated {Month D, YYYY}", .{updated});
+        }
+    }
+    try writer.writeAll("\n");
     for (doc.blocks) |block| try formatBlockGmi(block, writer);
     try writer.writeAll("\n");
 }
@@ -873,8 +885,8 @@ fn formatBlogIndexGmi(pages: []const Page, writer: anytype) !void {
     for (pages) |page| {
         try writer.print("=> {s}.gmi {} - {s}\n", .{
             page.filename,
-            page.created,
-            page.title,
+            page.info.created,
+            page.info.title,
         });
     }
     try writer.writeAll("\n");
