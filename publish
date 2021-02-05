@@ -1,15 +1,15 @@
 #!/bin/bash
 
 if [[ $1 == 'assets' ]]; then
-  HTML_PATHS="html/media/* html/*.woff";
-  GMI_PATHS="gmi/media/*";
+  HTML_PATHS="html/media html/*.woff";
+  GMI_PATHS="gmi/media";
 else
-  HTML_PATHS="html/blog/*.html html/wiki/*.html html/*.html html/style.css"
-  GMI_PATHS="gmi/gemlog/*.gmi gmi/wiki/*.gmi gmi/*.gmi"
+  HTML_PATHS="html/blog/ html/wiki/ html/*.html html/style.css"
+  GMI_PATHS="gmi/gemlog/ gmi/wiki/ gmi/*.gmi"
 fi
 
 sh ./build && \
-scp $HTML_PATHS \
+scp -r $HTML_PATHS \
   web@clarity.flowers:/srv/www/clarity.flowers/ &&\
-scp $GMI_PATHS \
+scp -r $GMI_PATHS \
   web@clarity.flowers:/srv/gemini/clarity.flowers/
