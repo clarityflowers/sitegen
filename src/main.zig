@@ -196,7 +196,7 @@ fn renderFiles(
 
 /// Returns false if it hit the end of the stream
 fn readLine(reader: anytype, array_list: *std.ArrayList(u8)) !bool {
-    while (read.readByte()) |byte| {
+    while (reader.readByte()) |byte| {
         if (byte == '\n') return true;
         try array_list.append(byte);
     } else |err| switch (err) {
@@ -219,7 +219,7 @@ fn readLines(
     defer file.close();
     var current_line = std.ArrayList(u8).init(allocator);
     const reader = file.reader();
-    while (readLine(reader, &current_line)) {
+    while (try readLine(reader, &current_line)) {
         if (std.mem.startsWith(u8, current_line.items, "; ")) {
             if (include_private) {
                 try lines.append(current_line.toOwnedSlice()[2..]);
@@ -262,14 +262,11 @@ const Block = union(enum) {
     raw: Raw,
     heading: []const u8,
     subheading: []const u8,
-    divider,
     quote: []const []const Span,
     list: []const []const Span,
     links: []const Link,
     unknown_command: []const u8,
-    image: Image,
     preformatted: []const []const u8,
-    nothing,
 };
 
 const Raw = struct {
@@ -414,12 +411,8 @@ fn parseBlock(lines: []const []const u8, line: usize, allocator: *std.mem.Alloca
         return ok(Block{ .heading = heading }, line + 1);
     } else if (parseSubheading(lines[line])) |subheading| {
         return ok(Block{ .subheading = subheading }, line + 1);
-    } else if (parseImage(lines[line])) |image| {
-        return ok(Block{ .image = image }, line + 1);
     } else if (try parseLinks(lines, line, allocator)) |res| {
         return ok(Block{ .links = res.data }, res.new_pos);
-    } else if (parseDivider(lines[line])) {
-        return ok(Block{ .divider = .{} }, line + 1);
     } else if (try parseList(lines, line, allocator, "- ")) |res| {
         return ok(Block{ .list = res.data }, res.new_pos);
     } else return null;
@@ -458,10 +451,6 @@ fn parsePrefixedLines(
 
 fn parseToc(line: []const u8) bool {
     return std.mem.eql(u8, line, "!toc");
-}
-
-fn parseDivider(line: []const u8) bool {
-    return std.mem.eql(u8, line, "!divider");
 }
 
 fn parseHeading(line: []const u8) ?[]const u8 {
@@ -554,25 +543,6 @@ fn parseWrapper(
     return ok(@as([]const []const Span, paragraphs.toOwnedSlice()), line);
 }
 
-fn parseImage(line: []const u8) ?Image {
-    comptime const prefix = "[img:";
-    if (!std.mem.startsWith(u8, line, prefix)) return null;
-    const text_end = std.mem.indexOf(u8, line, "](") orelse return null;
-    const end = std.mem.indexOf(u8, line[text_end..], ")") orelse return null;
-    if (std.mem.indexOf(u8, line[text_end .. text_end + end], "->")) |dest_end| {
-        return Image{
-            .text = line[prefix.len..text_end],
-            .url = line[text_end + 2 .. text_end + dest_end],
-            .destination = line[text_end + dest_end .. text_end + end],
-        };
-    } else {
-        return Image{
-            .text = line[prefix.len..text_end],
-            .url = line[text_end + 2 .. text_end + end],
-            .destination = null,
-        };
-    }
-}
 fn parseParagraph(
     lines: []const []const u8,
     l: usize,
@@ -832,23 +802,6 @@ fn formatBlockHtml(
             .html => for (raw.lines) |line| try writer.print("{s}\n", .{line}),
             else => {},
         },
-        .image => |image| {
-            if (image.destination) |dest| {
-                try writer.print(
-                    \\<a class="img" href="{s}">
-                , .{dest});
-            }
-            try writer.print(
-                \\<img src="{s}" alt="{s}">
-            , .{
-                image.url,
-                image.text,
-            });
-            if (image.destination != null) {
-                try writer.writeAll("</a>");
-            }
-            try writer.writeByte('\n');
-        },
         .links => |links| {
             for (links) |link| {
                 const text = link.text orelse link.url;
@@ -857,9 +810,6 @@ fn formatBlockHtml(
                     link.text,
                 });
             }
-        },
-        .divider => {
-            try writer.writeAll("<hr/>\n");
         },
         .list => |list| {
             try writer.writeAll("<ul>\n");
@@ -887,7 +837,6 @@ fn formatBlockHtml(
         .unknown_command => |command| {
             try writer.print("UNKNOWN COMMAND: {s}\n", .{command});
         },
-        .nothing => {},
     }
 }
 
@@ -989,7 +938,6 @@ fn formatBlockGmi(
             },
             else => {},
         },
-        .image => {},
         .links => |links| {
             for (links) |link| {
                 try writer.print("=> {s}", .{link.url});
@@ -999,16 +947,6 @@ fn formatBlockGmi(
                 try writer.writeByte('\n');
             }
             try writer.writeByte('\n');
-        },
-        .divider => {
-            try writer.writeAll(
-                \\
-                \\```
-                \\~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-                \\```
-                \\
-                \\
-            );
         },
         .list => |list| {
             for (list) |item| {
@@ -1033,7 +971,6 @@ fn formatBlockGmi(
         .unknown_command => |command| {
             try writer.print("UNKNOWN COMMAND: {s}\n", .{command});
         },
-        .nothing => {},
     }
 }
 
