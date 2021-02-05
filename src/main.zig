@@ -194,6 +194,17 @@ fn renderFiles(
     }
 }
 
+/// Returns false if it hit the end of the stream
+fn readLine(reader: anytype, array_list: *std.ArrayList(u8)) !bool {
+    while (read.readByte()) |byte| {
+        if (byte == '\n') return true;
+        try array_list.append(byte);
+    } else |err| switch (err) {
+        error.EndOfStream => return false,
+        else => |other_err| return other_err,
+    }
+}
+
 /// Caller owns result
 fn readLines(
     src_dir: *std.fs.Dir,
@@ -208,33 +219,16 @@ fn readLines(
     defer file.close();
     var current_line = std.ArrayList(u8).init(allocator);
     const reader = file.reader();
-    while (reader.readByte()) |byte| {
-        if (byte == '\n') {
-            if (std.mem.startsWith(u8, current_line.items, "; ")) {
-                if (include_private) {
-                    try lines.append(current_line.toOwnedSlice()[2..]);
-                } else {
-                    current_line.shrinkRetainingCapacity(0);
-                }
+    while (readLine(reader, &current_line)) {
+        if (std.mem.startsWith(u8, current_line.items, "; ")) {
+            if (include_private) {
+                try lines.append(current_line.toOwnedSlice()[2..]);
             } else {
-                try lines.append(current_line.toOwnedSlice());
+                current_line.shrinkRetainingCapacity(0);
             }
         } else {
-            try current_line.append(byte);
+            try lines.append(current_line.toOwnedSlice());
         }
-    } else |err| switch (err) {
-        error.EndOfStream => {
-            if (std.mem.startsWith(u8, current_line.items, "; ")) {
-                if (include_private) {
-                    try lines.append(current_line.toOwnedSlice()[2..]);
-                } else {
-                    current_line.deinit();
-                }
-            } else {
-                try lines.append(current_line.toOwnedSlice());
-            }
-        },
-        else => |other_err| return other_err,
     }
     return lines.toOwnedSlice();
 }
