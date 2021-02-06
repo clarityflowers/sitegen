@@ -159,7 +159,6 @@ fn renderDir(
         const lines = try readLines(src_file.reader(), &arena.allocator);
         const doc = try parseDocument(lines, item.name, &arena.allocator);
         if (doc.info.private and !include_private) continue;
-        log.debug("Parsed", .{});
         {
             try html_dir.makePath(dir_path);
             var dir = try html_dir.openDir(dir_path, .{});
@@ -733,7 +732,7 @@ fn parseSpans(
                 try spans.append(.{ .text = text.toOwnedSlice() });
             }
             try spans.append(res.data);
-            col += res.new_pos;
+            col = res.new_pos;
         } else {
             try text.append(line[col]);
             col += 1;

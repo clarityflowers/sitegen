@@ -1,12 +1,7 @@
 originals/
 public-old/
 .vscode/
-html/
-gmi/
 zig-cache/
-wiki/
-home/
-blog/
 public/
 public-html/
 build
@@ -14,3 +9,5 @@ publish
 watch
 site/
 build2
+old/
+out/
