@@ -893,7 +893,7 @@ fn formatBlockHtml(
         .preformatted => |lines| {
             try writer.writeAll("<pre>\n");
             for (lines) |line| {
-                try writer.print("  {s}\n", .{line});
+                try writer.print("{s}\n", .{line});
             }
             try writer.writeAll("</pre>\n");
         },
