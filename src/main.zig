@@ -439,9 +439,7 @@ fn parseCommand(
 
     const lines = try readLines(process.stdout.?.reader(), allocator);
     switch (try process.wait()) {
-        .Exited => {
-            return try parseBlocks(lines, 0, allocator);
-        },
+        .Exited => return try parseBlocks(lines, 0, allocator),
         else => return error.ProcessEndedUnexpectedly,
     }
 }
@@ -499,22 +497,14 @@ fn parsePrefixedLines(
     return ok(@as([]const []const u8, result.toOwnedSlice()), line);
 }
 
-fn parseToc(line: []const u8) bool {
-    return std.mem.eql(u8, line, "!toc");
-}
-
 fn parseHeading(line: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, line, "# ")) return line[2..];
     return null;
 }
 
 fn parseSubheading(line: []const u8) ?[]const u8 {
-    if (std.mem.startsWith(u8, line, "## ")) return line[2..];
+    if (std.mem.startsWith(u8, line, "## ")) return line[3..];
     return null;
-}
-
-fn parseEnd(line: []const u8) ?bool {
-    return std.mem.eql(u8, line, "!end");
 }
 
 fn parseList(
