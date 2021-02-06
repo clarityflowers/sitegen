@@ -69,7 +69,7 @@ fn make(
         \\  out_dir   the output folder for all generated content
         \\  site_dir  the input folder for the site itself, defaults to cwd
         \\options:
-        \\  --help    show this text
+        \\  --help         show this text
         \\  -p, --private  include private content in the build
     ;
     if (args.len == 0) {
@@ -159,6 +159,7 @@ fn renderDir(
         const lines = try readLines(src_file.reader(), &arena.allocator);
         const doc = try parseDocument(lines, item.name, &arena.allocator);
         if (doc.info.private and !include_private) continue;
+        log.debug("Parsed", .{});
         {
             try html_dir.makePath(dir_path);
             var dir = try html_dir.openDir(dir_path, .{});
@@ -468,7 +469,7 @@ fn parseCommand(
         ":",
         allocator,
     )) |res| {
-        defer allocator.free(lines);
+        defer allocator.free(res.data);
         const shell = try std.process.getEnvVarOwned(allocator, "SHELL");
 
         var process = try std.ChildProcess.init(
@@ -889,27 +890,30 @@ fn formatBlockHtml(
         .heading => |heading| {
             try writer.writeAll("<h2 id=\"");
             try formatId(heading, writer);
-            try writer.print("\">{s}</h2>\n", .{heading});
+            const text = HtmlText.init(heading);
+            try writer.print("\">{s}</h2>\n", .{text});
         },
         .subheading => |subheading| {
             try writer.writeAll("<h3 id=\"");
             try formatId(subheading, writer);
-            try writer.print("\">{s}</h2>\n", .{subheading});
+            const text = HtmlText.init(subheading);
+            try writer.print("\">{s}</h2>\n", .{text});
         },
         .raw => |raw| switch (raw.ext) {
-            .html => for (raw.lines) |line| try writer.print("{s}\n", .{line}),
+            .html => for (raw.lines) |line| {
+                try writer.print("{s}\n", .{line});
+            },
             else => {},
         },
         .links => |links| {
             for (links) |link| {
-                const text = link.text orelse link.url;
-                try writer.print("<a href=\"{s}", .{link.url});
+                const text = HtmlText.init(link.text orelse link.url);
+                const url = HtmlText.init(link.url);
+                try writer.print("<a href=\"{s}", .{url});
                 if (link.auto_ext) {
                     try writer.writeAll(".html");
                 }
-                try writer.print("\">{s}</a>\n", .{
-                    link.text,
-                });
+                try writer.print("\">{s}</a>\n", .{text});
             }
         },
         .list => |list| {
@@ -931,7 +935,8 @@ fn formatBlockHtml(
         .preformatted => |lines| {
             try writer.writeAll("<pre>\n");
             for (lines) |line| {
-                try writer.print("{s}\n", .{line});
+                const text = HtmlText.init(line);
+                try writer.print("{s}\n", .{text});
             }
             try writer.writeAll("</pre>\n");
         },
@@ -944,7 +949,8 @@ fn formatBlockHtml(
 fn formatSpanHtml(span: Span, writer: anytype) @TypeOf(writer).Error!void {
     switch (span) {
         .text => |text| {
-            try writer.writeAll(text);
+            const formatted = HtmlText.init(text);
+            try writer.print("{}", .{formatted});
         },
         .emphasis => |spans| {
             try writer.writeAll("<em>");
@@ -974,6 +980,27 @@ pub fn formatId(string: []const u8, writer: anytype) !void {
         else => try writer.writeByte(char),
     };
 }
+
+pub const HtmlText = struct {
+    text: []const u8,
+    fn init(text: []const u8) @This() {
+        return .{ .text = text };
+    }
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        for (self.text) |char| switch (char) {
+            '>' => try writer.writeAll("&gt;"),
+            '<' => try writer.writeAll("&lt;"),
+            '\"' => try writer.writeAll("&quot;"),
+            '&' => try writer.writeAll("&amp;"),
+            else => try writer.writeByte(char),
+        };
+    }
+};
 
 // ---- GEMINI FORMATTING ----
 
