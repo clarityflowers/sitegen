@@ -229,6 +229,9 @@ fn readLines(
             try lines.append(current_line.toOwnedSlice());
         }
     }
+    if (current_line.items.len > 0) {
+        try lines.append(current_line.toOwnedSlice());
+    }
     return lines.toOwnedSlice();
 }
 
