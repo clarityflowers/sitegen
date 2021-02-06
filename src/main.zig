@@ -32,17 +32,20 @@ pub fn main() anyerror!void {
         \\  make  The main generation tool
         \\  index  Outputs site indexes in various formats
     ;
+    const stdout = std.io.getStdOut().writer();
     if (args.len <= 1) {
-        try std.io.getStdOut().writer().print(help, .{exe_name});
+        try stdout.print(help, .{exe_name});
         return;
     }
     if (std.mem.eql(u8, args[1], "make")) {
         try make(exe_name, args[2..], &gpa.allocator);
     } else if (std.mem.eql(u8, args[1], "index")) {
         try buildIndex(exe_name, args[2..], &gpa.allocator);
+    } else if (std.mem.endsWith(u8, args[1], "help")) {
+        try stdout.print(help, .{exe_name});
     } else {
-        log.alert("Unknown command {s}", .{args[2]});
-        try std.io.getStdOut().writer().print(help, .{exe_name});
+        log.alert("Unknown command {s}", .{args[1]});
+        try stdout.print(help, .{exe_name});
     }
 }
 
@@ -423,12 +426,12 @@ fn parseBlocks(
     var blocks = std.ArrayList(Block).init(allocator);
     var spans = std.ArrayList(Span).init(allocator);
     while (index < lines.len) {
-        if (try parseCommand(lines[index], allocator)) |res| {
+        if (try parseCommand(lines, index, allocator)) |res| {
             if (spans.items.len > 0) {
                 try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
             }
-            try blocks.appendSlice(res);
-            index += 1;
+            try blocks.appendSlice(res.data);
+            index = res.new_pos;
         } else if (try parseBlock(lines, index, allocator)) |res| {
             if (spans.items.len > 0) {
                 try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
@@ -455,35 +458,51 @@ fn parseBlocks(
 }
 
 fn parseCommand(
-    line: []const u8,
+    lines: []const []const u8,
+    start: usize,
     allocator: *std.mem.Allocator,
-) !?[]const Block {
-    if (!std.mem.startsWith(u8, line, ": ")) return null;
-    const shell = try std.process.getEnvVarOwned(allocator, "SHELL");
-
-    var process = try std.ChildProcess.init(
-        &[_][]const u8{shell},
+) !?ParseResult([]const Block) {
+    if (try parsePrefixedLines(
+        lines,
+        start,
+        ":",
         allocator,
-    );
-    defer process.deinit();
-    process.env_map = &env_map;
-    process.stdin_behavior = .Pipe;
-    process.stdout_behavior = .Pipe;
+    )) |res| {
+        const shell = try std.process.getEnvVarOwned(allocator, "SHELL");
 
-    try process.spawn();
-    errdefer _ = process.kill() catch |err| {
-        log.warn("Had trouble cleaning up process: {}", .{err});
-    };
+        var process = try std.ChildProcess.init(
+            &[_][]const u8{shell},
+            allocator,
+        );
+        defer process.deinit();
+        process.env_map = &env_map;
+        process.stdin_behavior = .Pipe;
+        process.stdout_behavior = .Pipe;
 
-    try process.stdin.?.writer().writeAll(line[2..]);
-    process.stdin.?.close();
-    process.stdin = null;
+        try process.spawn();
+        errdefer _ = process.kill() catch |err| {
+            log.warn("Had trouble cleaning up process: {}", .{err});
+        };
+        const writer = process.stdin.?.writer();
+        for (res.data) |line| {
+            try writer.print("{s}\n", .{line});
+        }
+        process.stdin.?.close();
+        process.stdin = null;
 
-    const lines = try readLines(process.stdout.?.reader(), allocator);
-    switch (try process.wait()) {
-        .Exited => return try parseBlocks(lines, 0, allocator),
-        else => return error.ProcessEndedUnexpectedly,
+        const result_lines = try readLines(
+            process.stdout.?.reader(),
+            allocator,
+        );
+        switch (try process.wait()) {
+            .Exited => return ok(
+                try parseBlocks(result_lines, 0, allocator),
+                res.new_pos,
+            ),
+            else => return error.ProcessEndedUnexpectedly,
+        }
     }
+    return null;
 }
 
 fn parseBlock(
