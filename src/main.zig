@@ -8,26 +8,77 @@ const Dir = struct {
 };
 
 var include_private = false;
+var env_map: std.BufMap = undefined;
 
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit()) log.debug("Detected memory leak.", .{});
 
-    var cwd = std.fs.cwd();
+    env_map = try std.process.getEnvMap(&gpa.allocator);
+    defer env_map.deinit();
 
     var args = try getArgs(&gpa.allocator);
     defer gpa.allocator.free(args);
     defer for (args) |arg| gpa.allocator.free(arg);
+    const exe_name = args[0];
+    comptime const usage =
+        \\usage:
+        \\  {s} <command> [<args>]
+        \\
+    ;
+    comptime const help = usage ++
+        \\
+        \\commands:
+        \\  make  The main generation tool
+        \\  index  Outputs site indexes in various formats
+    ;
+    if (args.len <= 1) {
+        try std.io.getStdOut().writer().print(help, .{exe_name});
+        return;
+    }
+    if (std.mem.eql(u8, args[1], "make")) {
+        try make(exe_name, args[2..], &gpa.allocator);
+    } else if (std.mem.eql(u8, args[1], "index")) {
+        try buildIndex(exe_name, args[2..], &gpa.allocator);
+    } else {
+        log.alert("Unknown command {s}", .{args[2]});
+        try std.io.getStdOut().writer().print(help, .{exe_name});
+    }
+}
 
-    var index: usize = 1;
-    while (index < args.len - 1) : (index += 1) {
+fn make(
+    exe_name: []const u8,
+    args: []const []const u8,
+    allocator: *std.mem.Allocator,
+) !void {
+    var cwd = std.fs.cwd();
+
+    var index: usize = 0;
+    const usage =
+        \\usage:
+        \\  {0s} make [-p] [--private] [--] <out_dir> [<site_dir>]
+        \\  {0s} make [--help]
+        \\
+    ;
+    const help = usage ++
+        \\
+        \\arguments:
+        \\  out_dir   the output folder for all generated content
+        \\  site_dir  the input folder for the site itself, defaults to cwd
+        \\options:
+        \\  --help    show this text
+        \\  -p, --private  include private content in the build
+    ;
+    if (args.len == 0) {
+        try std.io.getStdOut().writer().print(usage, .{exe_name});
+        return;
+    }
+    while (index < args.len) : (index += 1) {
         if (getOpt(args[index], "private", 'p')) {
             include_private = true;
+            try env_map.set("INCLUDE_PRIVATE", "true");
         } else if (getOpt(args[index], "help", null)) {
-            try std.io.getStdOut().writer().print(
-                \\Usage:
-                \\  {s} [-p] [--private] [--help] [--] <out_dir> [<site_dir>]
-            , .{args[0]});
+            try std.io.getStdOut().writer().print(help, .{exe_name});
             return;
         } else if (getOpt(args[index], "", null)) {
             index += 1;
@@ -38,8 +89,10 @@ pub fn main() anyerror!void {
         } else {
             break;
         }
-    } else {
+    }
+    if (index >= args.len) {
         log.alert("Missing <out_dir> argument.", .{});
+        try std.io.getStdOut().writer().print(usage, .{exe_name});
         return error.BadArgs;
     }
     try cwd.makePath(args[index]);
@@ -56,8 +109,10 @@ pub fn main() anyerror!void {
         if (index < args.len) args[index] else ".",
         .{ .iterate = true },
     );
+    // Ensures that child processes work as you might expect
+    try site_dir.setAsCwd();
     defer site_dir.close();
-    try renderDir(&site_dir, null, &html_dir, &gmi_dir, &gpa.allocator);
+    try renderDir(&site_dir, null, &html_dir, &gmi_dir, allocator);
     var it = site_dir.iterate();
     while (try it.next()) |item| {
         if (item.kind != .Directory) continue;
@@ -66,7 +121,7 @@ pub fn main() anyerror!void {
             item.name,
             &html_dir,
             &gmi_dir,
-            &gpa.allocator,
+            allocator,
         );
     }
 
@@ -85,6 +140,7 @@ fn renderDir(
         dir_path,
         .{ .iterate = true },
     );
+    try src_dir.setAsCwd();
     defer src_dir.close();
     var it = src_dir.iterate();
     while (try it.next()) |item| {
@@ -405,8 +461,12 @@ fn parseCommand(
     if (!std.mem.startsWith(u8, line, ": ")) return null;
     const shell = try std.process.getEnvVarOwned(allocator, "SHELL");
 
-    var process = try std.ChildProcess.init(&[_][]const u8{shell}, allocator);
+    var process = try std.ChildProcess.init(
+        &[_][]const u8{shell},
+        allocator,
+    );
     defer process.deinit();
+    process.env_map = &env_map;
     process.stdin_behavior = .Pipe;
     process.stdout_behavior = .Pipe;
 
@@ -796,28 +856,6 @@ pub fn formatHtml(
     );
 }
 
-fn formatBlogIndexHtml(pages: []const Page, writer: anytype) !void {
-    try writer.writeAll(html_preamble ++
-        \\<title>Clarity's Journal</title>
-        \\</head>
-        \\<a href="../">return home</a>
-        \\<main>
-        \\<header><h1>clarity's blog</h1></header>
-        \\
-    );
-    for (pages) |page| {
-        try writer.print(
-            \\<a href="{s}.html">{YYYY/MM/DD} – {s}</a>
-            \\
-        , .{ page.filename, page.info.created, page.info.title });
-    }
-    try writer.writeAll(
-        \\</main>
-        \\</body>
-        \\</html>
-    );
-}
-
 fn formatBlockHtml(
     block: Block,
     writer: anytype,
@@ -936,18 +974,6 @@ pub fn formatGmi(
     try writer.writeAll("\n");
 }
 
-fn formatBlogIndexGmi(pages: []const Page, writer: anytype) !void {
-    try writer.writeAll("# Clarity's Journal\n\n");
-    for (pages) |page| {
-        try writer.print("=> {s}.gmi {} - {s}\n", .{
-            page.filename,
-            page.info.created,
-            page.info.title,
-        });
-    }
-    try writer.writeAll("\n");
-}
-
 fn formatParagraphGmi(
     spans: []const Span,
     prefix: []const u8,
@@ -1029,5 +1055,91 @@ fn formatSpanGmi(span: Span, writer: anytype) @TypeOf(writer).Error!void {
         .anchor => |anchor| for (anchor.text) |sp|
             try formatSpanGmi(sp, writer),
         .br => try writer.writeAll("\n"),
+    }
+}
+
+// ---- INDEXING ----
+
+fn buildIndex(
+    exe_name: []const u8,
+    args: []const []const u8,
+    allocator: *std.mem.Allocator,
+) !void {
+    var arg_i: usize = 0;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const usage =
+        \\usage:
+        \\  {0s} index [--help]
+        \\  {0s} index [-p] [--private] [--] <file> [<file>...]
+    ;
+    const stdout = std.io.getStdOut().writer();
+    if (args.len == 0) {
+        try stdout.print(usage, .{exe_name});
+        return;
+    }
+    while (arg_i < args.len) : (arg_i += 1) {
+        const arg = args[arg_i];
+        if (getOpt(arg, "private", 'p')) {
+            include_private = true;
+        } else if (getOpt(arg, "help", null)) {
+            try stdout.print(usage, .{exe_name});
+            return;
+        } else if (getOpt(arg, "-", null)) {
+            arg_i += 1;
+            break;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            log.alert("Unknown argument {}", .{arg});
+            return error.BadArgs;
+        } else break;
+    }
+    if (arg_i >= args.len) {
+        log.alert("Missing argument <file>.", .{});
+        try stdout.print(usage, .{exe_name});
+        return;
+    }
+    var files = std.ArrayList([]const u8).init(&arena.allocator);
+    while (arg_i < args.len) : (arg_i += 1) {
+        try files.append(args[arg_i]);
+    }
+    const cwd = std.fs.cwd();
+    var pages = std.ArrayList(Page).init(&arena.allocator);
+    for (files.items) |filename| {
+        var file = try cwd.openFile(filename, .{});
+        defer file.close();
+
+        const lines = blk: {
+            var lines = std.ArrayList([]const u8).init(
+                &arena.allocator,
+            );
+            var line = std.ArrayList(u8).init(&arena.allocator);
+            while (try readLine(file.reader(), &line)) {
+                if (line.items.len == 0) break;
+                try lines.append(line.toOwnedSlice());
+            }
+            break :blk lines.toOwnedSlice();
+        };
+        var info = (try parseInfo(lines)).data;
+        if (info.private and !include_private) continue;
+        try pages.append(.{ .filename = filename, .info = info });
+    }
+    const sortFn = struct {
+        fn earlierThan(context: void, lhs: Page, rhs: Page) bool {
+            return lhs.info.created.isBefore(rhs.info.created);
+        }
+    }.earlierThan;
+    try formatIndexMarkup(stdout, pages.items);
+}
+
+fn formatIndexMarkup(writer: anytype, pages: []const Page) !void {
+    for (pages) |page| {
+        if (page.info.private) {
+            try writer.writeAll("; ");
+        }
+        try writer.print("=> {s}.* {} – {s}\n", .{
+            page.filename,
+            page.info.created,
+            page.info.title,
+        });
     }
 }
