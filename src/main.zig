@@ -468,6 +468,7 @@ fn parseCommand(
         ":",
         allocator,
     )) |res| {
+        defer allocator.free(lines);
         const shell = try std.process.getEnvVarOwned(allocator, "SHELL");
 
         var process = try std.ChildProcess.init(
