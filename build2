@@ -1,0 +1,8 @@
+#!/bin/sh
+
+rm -rf out
+mkdir -p out/html out/gmi
+cp -r public-html/* out/html/
+cp -r public/* out/html/
+cp -r public/* out/gmi
+zig build run -- out site

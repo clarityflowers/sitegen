@@ -10,187 +10,173 @@ const Dir = struct {
 var include_private = false;
 
 pub fn main() anyerror!void {
-    log.info("Hello!", .{});
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit()) log.debug("Detected memory leak.", .{});
 
-    inline for (@typeInfo(Ext).Enum.fields) |fld| {
-        try std.fs.cwd().makePath(fld.name);
-    }
+    var cwd = std.fs.cwd();
 
-    const args = try std.process.argsAlloc(&gpa.allocator);
-    defer std.process.argsFree(&gpa.allocator, args);
+    var args = try getArgs(&gpa.allocator);
+    defer gpa.allocator.free(args);
+    defer for (args) |arg| gpa.allocator.free(arg);
 
-    include_private = args.len > 1 and
-        (std.mem.eql(u8, args[1], "-p") or std.mem.eql(u8, args[1], "--private"));
-
-    const cwd = std.fs.cwd();
-
-    {
-        var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
-        defer arena.deinit();
-        var journal_dir = try cwd.openDir("blog", .{ .iterate = true });
-        defer journal_dir.close();
-
-        const files = try getFiles(&journal_dir, &arena.allocator);
-
-        try renderFiles(
-            &journal_dir,
-            files,
-            "journal",
-            "journal index",
-            true,
-            &gpa.allocator,
-        );
-        {
-            const journal_index_file = try cwd.createFile(
-                "html/journal/index.html",
-                .{ .truncate = true },
-            );
-            defer journal_index_file.close();
-            const writer = journal_index_file.writer();
-            try formatBlogIndexHtml(files, writer);
+    var index: usize = 1;
+    while (index < args.len - 1) : (index += 1) {
+        if (getOpt(args[index], "private", 'p')) {
+            include_private = true;
+        } else if (getOpt(args[index], "help", null)) {
+            try std.io.getStdOut().writer().print(
+                \\Usage:
+                \\  {s} [-p] [--private] [--help] [--] <out_dir> [<site_dir>]
+            , .{args[0]});
+            return;
+        } else if (getOpt(args[index], "", null)) {
+            index += 1;
+            break;
+        } else if (std.mem.startsWith(u8, args[index], "-")) {
+            log.alert("Unknown arg {s}", .{args[index]});
+            return error.BadArgs;
+        } else {
+            break;
         }
-        {
-            const journal_index_file = try cwd.createFile(
-                "gmi/journal/index.gmi",
-                .{ .truncate = true },
-            );
-            defer journal_index_file.close();
-            const writer = journal_index_file.writer();
-            try formatBlogIndexGmi(files, writer);
-        }
+    } else {
+        log.alert("Missing <out_dir> argument.", .{});
+        return error.BadArgs;
     }
-    {
-        var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
-        defer arena.deinit();
-        var home_dir = try cwd.openDir("home", .{ .iterate = true });
-        defer home_dir.close();
-
-        const files = try getFiles(&home_dir, &arena.allocator);
-
-        try renderFiles(
-            &home_dir,
-            files,
-            ".",
-            null,
-            false,
+    try cwd.makePath(args[index]);
+    var out_dir = try cwd.openDir(args[index], .{});
+    defer out_dir.close();
+    try out_dir.makePath("html");
+    try out_dir.makePath("gmi");
+    var html_dir = try out_dir.openDir("html", .{});
+    defer html_dir.close();
+    var gmi_dir = try out_dir.openDir("gmi", .{});
+    defer gmi_dir.close();
+    index += 1;
+    var site_dir = try cwd.openDir(
+        if (index < args.len) args[index] else ".",
+        .{ .iterate = true },
+    );
+    defer site_dir.close();
+    try renderDir(&site_dir, null, &html_dir, &gmi_dir, &gpa.allocator);
+    var it = site_dir.iterate();
+    while (try it.next()) |item| {
+        if (item.kind != .Directory) continue;
+        try renderDir(
+            &site_dir,
+            item.name,
+            &html_dir,
+            &gmi_dir,
             &gpa.allocator,
         );
     }
-    {
-        var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
-        defer arena.deinit();
-        var wiki_dir = try cwd.openDir("wiki", .{ .iterate = true });
-        defer wiki_dir.close();
 
-        const files = try getFiles(&wiki_dir, &arena.allocator);
-
-        try renderFiles(
-            &wiki_dir,
-            files,
-            "wiki",
-            "wiki index",
-            false,
-            &gpa.allocator,
-        );
-    }
     log.info("Done!", .{});
 }
 
-/// Caller owns the returned files
-fn getFiles(
-    src_dir: *std.fs.Dir,
-    allocator: *std.mem.Allocator,
-) ![]const Page {
-    var iterator = src_dir.iterate();
-    var pages = std.ArrayList(Page).init(allocator);
-    while (try iterator.next()) |entry| {
-        if (entry.kind == .File) {
-            const file = try src_dir.openFile(entry.name, .{});
-            defer file.close();
-            const info = blk: {
-                var lines = std.ArrayList([]const u8).init(allocator);
-                var line = std.ArrayList(u8).init(allocator);
-                while (true) {
-                    try file.reader().readUntilDelimiterArrayList(
-                        &line,
-                        '\n',
-                        256,
-                    );
-                    if (line.items.len == 0) break;
-                    try lines.append(line.toOwnedSlice());
-                }
-                const res = try parseInfo(lines.items);
-                if (!include_private and res.data.private) {
-                    lines.deinit();
-                    continue;
-                }
-                break :blk res.data;
-            };
-            const filename = try allocator.dupe(u8, entry.name);
-            try pages.append(.{
-                .filename = filename,
-                .info = info,
-            });
-        }
-    }
-    return pages.toOwnedSlice();
-}
-
-/// All allocated memory is freed before function completes
-fn renderFiles(
-    src_dir: *std.fs.Dir,
-    files: []const Page,
-    out_path: []const u8,
-    back_text: ?[]const u8,
-    include_dates: bool,
+fn renderDir(
+    site_dir: *std.fs.Dir,
+    dirname: ?[]const u8,
+    html_dir: *std.fs.Dir,
+    gmi_dir: *std.fs.Dir,
     allocator: *std.mem.Allocator,
 ) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    for (files) |page| {
-        const lines = blk: {
-            const file = try src_dir.openFile(
-                page.filename,
-                .{ .read = true },
-            );
-            defer file.close();
-            break :blk try readLines(
-                file.reader(),
-                &arena.allocator,
-            );
-        };
-        log.info("Rendering {s}/{s}", .{ out_path, page.filename });
-        const doc = try parseDocument(
-            lines,
-            page.filename,
-            &arena.allocator,
-        );
-        inline for (@typeInfo(Ext).Enum.fields) |fld| {
-            var ext_out_dir = try std.fs.cwd().openDir(fld.name, .{});
-            defer ext_out_dir.close();
-            try ext_out_dir.makePath(out_path);
-            var out_dir = try ext_out_dir.openDir(out_path, .{});
-            defer out_dir.close();
+    const dir_path = dirname orelse ".";
+    var src_dir = try site_dir.openDir(
+        dir_path,
+        .{ .iterate = true },
+    );
+    defer src_dir.close();
+    var it = src_dir.iterate();
+    while (try it.next()) |item| {
+        if (item.kind != .File) continue;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        log.info("Generating {s}/{s}", .{
+            dir_path,
+            item.name,
+        });
+        defer arena.deinit();
+        const src_file = try src_dir.openFile(item.name, .{});
+        defer src_file.close();
+        const lines = try readLines(src_file.reader(), &arena.allocator);
+        const doc = try parseDocument(lines, item.name, &arena.allocator);
+        if (doc.info.private and !include_private) continue;
+        {
+            try html_dir.makePath(dir_path);
+            var dir = try html_dir.openDir(dir_path, .{});
+            defer dir.close();
             const out_filename = try std.mem.concat(
                 &arena.allocator,
                 u8,
-                &[_][]const u8{ page.filename, ".", fld.name },
+                &[_][]const u8{ item.name, ".html" },
             );
-            defer arena.allocator.free(out_filename);
-            const out_file = try out_dir.createFile(out_filename, .{});
+            const out_file = try dir.createFile(
+                out_filename,
+                .{ .truncate = true },
+            );
             defer out_file.close();
-            const writer = out_file.writer();
-            try formatDoc(
-                doc,
-                writer,
-                @field(Ext, fld.name),
-                back_text,
-                include_dates,
+            try formatHtml(doc, out_file.writer(), dirname, item.name);
+        }
+        {
+            try gmi_dir.makePath(dir_path);
+            var dir = try gmi_dir.openDir(dir_path, .{});
+            defer dir.close();
+            const out_filename = try std.mem.concat(
+                &arena.allocator,
+                u8,
+                &[_][]const u8{ item.name, ".gmi" },
             );
+            const out_file = try dir.createFile(
+                out_filename,
+                .{ .truncate = true },
+            );
+            defer out_file.close();
+            try formatGmi(doc, out_file.writer(), true);
         }
     }
+}
+
+/// Gets all of the process's args, kindly splitting shortform options like
+/// -oPt into -o -P -t to make parsing easier.
+/// Caller owns both the outer and inner slices
+fn getArgs(
+    allocator: *std.mem.Allocator,
+) ![]const []const u8 {
+    var args = std.ArrayList([]const u8).init(allocator);
+    errdefer args.deinit();
+    errdefer for (args.items) |arg| allocator.free(arg);
+    var it = std.process.ArgIterator.init();
+    defer it.deinit();
+    while (it.next(allocator)) |next_or_err| {
+        const arg = try next_or_err;
+        defer allocator.free(arg);
+        if (std.mem.startsWith(u8, arg, "-") and
+            !std.mem.startsWith(u8, arg, "--") and
+            arg.len > 2)
+        {
+            for (arg[1..]) |char| {
+                const buffer = try allocator.alloc(u8, 2);
+                buffer[0] = '-';
+                buffer[1] = char;
+                try args.append(buffer[0..]);
+            }
+        } else {
+            try args.append(try allocator.dupe(u8, arg));
+        }
+    }
+    return args.toOwnedSlice();
+}
+
+fn getOpt(
+    arg: []const u8,
+    comptime long: []const u8,
+    comptime short: ?u8,
+) bool {
+    if (short) |char| {
+        if (std.mem.eql(u8, arg, "-" ++ &[1]u8{char})) {
+            return true;
+        }
+    }
+    return std.mem.eql(u8, arg, "--" ++ long);
 }
 
 /// Returns false if it hit the end of the stream
@@ -236,7 +222,6 @@ const Ext = enum {
 
 const Document = struct {
     blocks: []const Block,
-    filename: []const u8,
     info: Info,
 };
 
@@ -298,7 +283,7 @@ const Anchor = struct {
 
 fn parseDocument(
     lines: []const []const u8,
-    filename: []const u8,
+    path: []const u8,
     allocator: *std.mem.Allocator,
 ) !Document {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -313,7 +298,6 @@ fn parseDocument(
     const result: Document = .{
         .blocks = blocks,
         .info = info_res.data,
-        .filename = filename,
     };
     return result;
 }
@@ -752,8 +736,8 @@ fn formatDoc(
 pub fn formatHtml(
     doc: Document,
     writer: anytype,
-    back_text: ?[]const u8,
-    include_dates: bool,
+    dirname: ?[]const u8,
+    filename: []const u8,
 ) !void {
     try writer.writeAll(html_preamble);
     try writer.print("<title>{0s} ~ Clarity's Blog</title>\n", .{doc.info.title});
@@ -762,12 +746,17 @@ pub fn formatHtml(
         \\<body>
         \\
     );
-    if (back_text) |text| {
-        if (std.mem.eql(u8, doc.filename, "index")) {
+    if (dirname) |dir| {
+        if (std.mem.eql(u8, filename, "index")) {
             try writer.writeAll("<a href=\"..\">return home</a>");
         } else {
-            try writer.print("<a href=\"./\">{s}</a>\n", .{text});
+            try writer.print(
+                "<a href=\".\">{s} index</a>\n",
+                .{dir},
+            );
         }
+    } else if (!std.mem.eql(u8, filename, "index")) {
+        try writer.writeAll("<a href=\".\">return home</a>");
     }
     try writer.writeAll("<main>\n");
     try writer.print(
@@ -775,11 +764,9 @@ pub fn formatHtml(
         \\  <h1>{s}</h1>
         \\
     , .{doc.info.title});
-    if (include_dates) {
-        try writer.print("Written {Month D, YYYY}", .{doc.info.created});
-        if (doc.info.updated) |updated| {
-            try writer.print(", updated {Month D, YYYY}", .{updated});
-        }
+    try writer.print("Written {Month D, YYYY}", .{doc.info.created});
+    if (doc.info.updated) |updated| {
+        try writer.print(", updated {Month D, YYYY}", .{updated});
     }
 
     try writer.writeAll(
