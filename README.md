@@ -1,5 +1,19 @@
 # Website Generator
 
-A single-file [Zig](https://ziglang.org) project to generate static html and [gemini](https://gemini.circumlunar.space/) pages for my website from markdown-ish sytax.
+A single-file [Zig](https://ziglang.org) project to generate static html and [gemini](https://gemini.circumlunar.space/) pages for my website from markdown-ish syntax.
 
-By keeping the functionality simple an the code structure straightfoward, adding and removing features becomes a straightfoward and inviting task. Rather than building a library of common tools or writing extensions or plugins, I want to keep the scope small enough that new variations for kinds of websites could be copy & paste clones with custom tweaks.
+[View the documentation](https://clarity.flowers/wiki/sitegen.html)
+
+## Installing
+
+You will need to [install zig](https://ziglang.org/download/).
+
+Depends on [zig-date](https://github.com/clarityflowers/zig-date) as a submodule.
+
+```
+git clone --recurse-submodules https://github.com/clarityflowers/sitegen.git
+cd sitegen
+zig build
+```
+
+This will produce `zig-cache/bin/sitegen`. To install to, say, `~/bin`, you could instead run `zig-cache --prefix ~`.
