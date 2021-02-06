@@ -29,37 +29,35 @@ pub fn main() anyerror!void {
     {
         var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
         defer arena.deinit();
-        var blog_dir = try cwd.openDir("blog", .{ .iterate = true });
-        defer blog_dir.close();
+        var journal_dir = try cwd.openDir("blog", .{ .iterate = true });
+        defer journal_dir.close();
 
-        const files = try getFiles(&blog_dir, &arena.allocator);
+        const files = try getFiles(&journal_dir, &arena.allocator);
 
         try renderFiles(
-            &blog_dir,
+            &journal_dir,
             files,
-            "blog",
-            "gemlog",
-            "blog index",
+            "journal",
+            "journal index",
             true,
             &gpa.allocator,
         );
         {
-            const blog_index_file = try cwd.createFile("html/blog/index.html", .{
-                .truncate = true,
-            });
-            defer blog_index_file.close();
-            const writer = blog_index_file.writer();
+            const journal_index_file = try cwd.createFile(
+                "html/journal/index.html",
+                .{ .truncate = true },
+            );
+            defer journal_index_file.close();
+            const writer = journal_index_file.writer();
             try formatBlogIndexHtml(files, writer);
         }
         {
-            const blog_index_file = try cwd.createFile(
-                "gmi/gemlog/index.gmi",
-                .{
-                    .truncate = true,
-                },
+            const journal_index_file = try cwd.createFile(
+                "gmi/journal/index.gmi",
+                .{ .truncate = true },
             );
-            defer blog_index_file.close();
-            const writer = blog_index_file.writer();
+            defer journal_index_file.close();
+            const writer = journal_index_file.writer();
             try formatBlogIndexGmi(files, writer);
         }
     }
@@ -74,7 +72,6 @@ pub fn main() anyerror!void {
         try renderFiles(
             &home_dir,
             files,
-            ".",
             ".",
             null,
             false,
@@ -92,7 +89,6 @@ pub fn main() anyerror!void {
         try renderFiles(
             &wiki_dir,
             files,
-            "wiki",
             "wiki",
             "wiki index",
             false,
@@ -146,8 +142,7 @@ fn getFiles(
 fn renderFiles(
     src_dir: *std.fs.Dir,
     files: []const Page,
-    html_out_path: []const u8,
-    gmi_out_path: []const u8,
+    out_path: []const u8,
     back_text: ?[]const u8,
     include_dates: bool,
     allocator: *std.mem.Allocator,
@@ -166,27 +161,25 @@ fn renderFiles(
                 &arena.allocator,
             );
         };
-        log.info("Rendering {s}/{s}", .{ gmi_out_path, page.filename });
+        log.info("Rendering {s}/{s}", .{ out_path, page.filename });
         const doc = try parseDocument(
             lines,
             page.filename,
             &arena.allocator,
         );
         inline for (@typeInfo(Ext).Enum.fields) |fld| {
-            const out_dir = try std.fs.cwd().openDir(fld.name, .{});
-            const out_path = switch (@field(Ext, fld.name)) {
-                .gmi => gmi_out_path,
-                .html => html_out_path,
-            };
-            try out_dir.makePath(out_path);
-            const blog_out_dir = try out_dir.openDir(out_path, .{});
+            var ext_out_dir = try std.fs.cwd().openDir(fld.name, .{});
+            defer ext_out_dir.close();
+            try ext_out_dir.makePath(out_path);
+            var out_dir = try ext_out_dir.openDir(out_path, .{});
+            defer out_dir.close();
             const out_filename = try std.mem.concat(
                 &arena.allocator,
                 u8,
                 &[_][]const u8{ page.filename, ".", fld.name },
             );
             defer arena.allocator.free(out_filename);
-            const out_file = try blog_out_dir.createFile(out_filename, .{});
+            const out_file = try out_dir.createFile(out_filename, .{});
             defer out_file.close();
             const writer = out_file.writer();
             try formatDoc(
@@ -818,7 +811,7 @@ pub fn formatHtml(
 
 fn formatBlogIndexHtml(pages: []const Page, writer: anytype) !void {
     try writer.writeAll(html_preamble ++
-        \\<title>Clarity's Blog</title>
+        \\<title>Clarity's Journal</title>
         \\</head>
         \\<a href="../">return home</a>
         \\<main>
@@ -957,7 +950,7 @@ pub fn formatGmi(
 }
 
 fn formatBlogIndexGmi(pages: []const Page, writer: anytype) !void {
-    try writer.writeAll("# Clarity's Gemlog\n\n");
+    try writer.writeAll("# Clarity's Journal\n\n");
     for (pages) |page| {
         try writer.print("=> {s}.gmi {} - {s}\n", .{
             page.filename,
