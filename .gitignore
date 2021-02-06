@@ -9,3 +9,6 @@ home/
 blog/
 public/
 public-html/
+build
+publish
+watch

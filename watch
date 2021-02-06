@@ -1,3 +1,0 @@
-#!/bin/bash
-
-fswatch -0 blog src public-html home | xargs -0 -n 1 -I {} ./build
