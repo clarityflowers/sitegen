@@ -282,6 +282,7 @@ const Image = struct {
 const Link = struct {
     url: []const u8,
     text: ?[]const u8 = null,
+    auto_ext: bool = false,
 };
 
 const Span = union(enum) {
@@ -545,17 +546,27 @@ fn parseLinks(
     while (line < lines.len and
         std.mem.startsWith(u8, lines[line], "=> ")) : (line += 1)
     {
-        const link = if (std.mem.indexOf(u8, lines[line][3..], " ")) |index|
-            Link{
-                .url = lines[line][3 .. index + 3],
-                .text = lines[line][index + 4 ..],
-            }
-        else
-            Link{
-                .url = lines[line][3..],
-                .text = null,
-            };
-        try result.append(link);
+        const url_end = std.mem.indexOfPos(
+            u8,
+            lines[line],
+            3,
+            " ",
+        ) orelse return null;
+        const text = lines[line][url_end + 1 ..];
+        const url = lines[line][3..url_end];
+
+        if (std.mem.endsWith(u8, url, ".*")) {
+            try result.append(.{
+                .url = url[0 .. url.len - 2],
+                .text = text,
+                .auto_ext = true,
+            });
+        } else {
+            try result.append(.{
+                .url = url,
+                .text = text,
+            });
+        }
     }
     if (result.items.len == 0) return null;
     return ok(@as([]const Link, result.toOwnedSlice()), line);
@@ -851,8 +862,11 @@ fn formatBlockHtml(
         .links => |links| {
             for (links) |link| {
                 const text = link.text orelse link.url;
-                try writer.print("<a href=\"{s}\">{s}</a>\n", .{
-                    link.url,
+                try writer.print("<a href=\"{s}", .{link.url});
+                if (link.auto_ext) {
+                    try writer.writeAll(".html");
+                }
+                try writer.print("\">{s}</a>\n", .{
                     link.text,
                 });
             }
@@ -987,6 +1001,9 @@ fn formatBlockGmi(
         .links => |links| {
             for (links) |link| {
                 try writer.print("=> {s}", .{link.url});
+                if (link.auto_ext) {
+                    try writer.writeAll(".gmi");
+                }
                 if (link.text) |text| {
                     try writer.print(" {s}", .{text});
                 }
