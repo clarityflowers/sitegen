@@ -1,15 +1,30 @@
+/// All of the source code for this project lives in this file.
+///
+/// Its layout looks like this:
+/// - entry point
+/// - make        document generating
+/// - models      data structures representing documents
+/// - parsing     reading source documents into the models
+/// - formatting  writing the models in the target format
+/// - indexing    formatting lists of documents
+/// - utils       common functions that I didn't have another place for
+///
+/// If you want to add new features, you'll need to add the new block/span type
+/// to the union, add the appropriate parser in the "parsing" section and hook it /// into the parsing flow. Then, in the formatting section, add handlers for your
+/// new union fields for both targets
+///
+/// If you want to change the templates documents render into, that's in
+/// formatHtml() and formatGmi().
+///
 const std = @import("std");
 const log = std.log.scoped(.website);
 const Date = @import("zig-date/src/main.zig").Date;
 
-const Dir = struct {
-    src: []const u8,
-    dest: []const u8,
-};
-
+/// Global variables aren't too hard to keep track of when you only have one file.
 var include_private = false;
 var env_map: std.BufMap = undefined;
 
+/// Entry point for the application
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit()) log.debug("Detected memory leak.", .{});
@@ -49,6 +64,9 @@ pub fn main() anyerror!void {
     }
 }
 
+// ---- MAKE ----
+
+/// Generate the site for all targets
 fn make(
     exe_name: []const u8,
     args: []const []const u8,
@@ -131,6 +149,7 @@ fn make(
     log.info("Done!", .{});
 }
 
+/// Iterate over all files in a directory and render their output for each target
 fn renderDir(
     site_dir: *std.fs.Dir,
     dirname: ?[]const u8,
@@ -194,96 +213,20 @@ fn renderDir(
     }
 }
 
-/// Gets all of the process's args, kindly splitting shortform options like
-/// -oPt into -o -P -t to make parsing easier.
-/// Caller owns both the outer and inner slices
-fn getArgs(
-    allocator: *std.mem.Allocator,
-) ![]const []const u8 {
-    var args = std.ArrayList([]const u8).init(allocator);
-    errdefer args.deinit();
-    errdefer for (args.items) |arg| allocator.free(arg);
-    var it = std.process.ArgIterator.init();
-    defer it.deinit();
-    while (it.next(allocator)) |next_or_err| {
-        const arg = try next_or_err;
-        defer allocator.free(arg);
-        if (std.mem.startsWith(u8, arg, "-") and
-            !std.mem.startsWith(u8, arg, "--") and
-            arg.len > 2)
-        {
-            for (arg[1..]) |char| {
-                const buffer = try allocator.alloc(u8, 2);
-                buffer[0] = '-';
-                buffer[1] = char;
-                try args.append(buffer[0..]);
-            }
-        } else {
-            try args.append(try allocator.dupe(u8, arg));
-        }
-    }
-    return args.toOwnedSlice();
-}
-
-fn getOpt(
-    arg: []const u8,
-    comptime long: []const u8,
-    comptime short: ?u8,
-) bool {
-    if (short) |char| {
-        if (std.mem.eql(u8, arg, "-" ++ &[1]u8{char})) {
-            return true;
-        }
-    }
-    return std.mem.eql(u8, arg, "--" ++ long);
-}
-
-/// Returns false if it hit the end of the stream
-fn readLine(reader: anytype, array_list: *std.ArrayList(u8)) !bool {
-    while (reader.readByte()) |byte| {
-        if (byte == '\n') return true;
-        try array_list.append(byte);
-    } else |err| switch (err) {
-        error.EndOfStream => return false,
-        else => |other_err| return other_err,
-    }
-}
-
-/// Caller owns result
-fn readLines(
-    reader: anytype,
-    allocator: *std.mem.Allocator,
-) ![]const []const u8 {
-    var lines = std.ArrayList([]const u8).init(allocator);
-    var current_line = std.ArrayList(u8).init(allocator);
-    while (try readLine(reader, &current_line)) {
-        if (std.mem.startsWith(u8, current_line.items, "; ")) {
-            if (include_private) {
-                try lines.append(current_line.toOwnedSlice()[2..]);
-            } else {
-                current_line.shrinkRetainingCapacity(0);
-            }
-        } else {
-            try lines.append(current_line.toOwnedSlice());
-        }
-    }
-    if (current_line.items.len > 0) {
-        try lines.append(current_line.toOwnedSlice());
-    }
-    return lines.toOwnedSlice();
-}
-
 // ---- MODELS ----
 
+/// The possible rendering targets
 const Ext = enum {
     html, gmi
 };
 
+/// A parsed document
 const Document = struct {
     blocks: []const Block,
     info: Info,
 };
 
+/// The metadata at the top of the document
 const Info = struct {
     title: []const u8,
     created: Date,
@@ -291,11 +234,13 @@ const Info = struct {
     private: bool = false,
 };
 
+/// A document that has only had the metadata parsed, for indexing
 const Page = struct {
     filename: []const u8,
     info: Info,
 };
 
+/// A line-level block of text
 const Block = union(enum) {
     paragraph: []const Span,
     raw: Raw,
@@ -304,27 +249,24 @@ const Block = union(enum) {
     quote: []const []const Span,
     list: []const []const Span,
     links: []const Link,
-    unknown_command: []const u8,
     preformatted: []const []const u8,
 };
 
+/// Text that should be copied as-is into the output IF the current rendering
+/// target matches the extension
 const Raw = struct {
     ext: Ext,
     lines: []const []const u8,
 };
 
-const Image = struct {
-    url: []const u8,
-    text: []const u8,
-    destination: ?[]const u8,
-};
-
+/// A line-level link
 const Link = struct {
     url: []const u8,
     text: ?[]const u8 = null,
     auto_ext: bool = false,
 };
 
+/// Inline formatting. Pretty much ignored entirely by gemini.
 const Span = union(enum) {
     text: []const u8,
     strong: []const Span,
@@ -333,6 +275,7 @@ const Span = union(enum) {
     br,
 };
 
+/// An inline link.
 const Anchor = struct {
     url: []const u8,
     text: []const Span,
@@ -340,6 +283,18 @@ const Anchor = struct {
 
 // ---- PARSING ----
 
+/// I have a specific parsing model I like to use that works pretty well for me.
+/// First, all of the document is split into a span of text lines. If a parsing
+/// function could consume multiple lines, it takes all of the lines (including
+/// those already consumed) along with a start index, then returns the resulting
+/// structure along with the new index if it found a match. If no match was found
+/// it returns null.
+/// What I like about this is that we always have the context of the current line
+/// number close on hand so that if we need to put out helpful log messages, we
+/// can, and it's easy to right "speculative parsers" that go along doing their
+/// to parse a format, but can "rewind" harmlessly if something goes wrong.
+/// In general, this also means that errors don't really happen, because if you
+/// mistype something it'll usually just fall back to raw text.
 fn parseDocument(
     lines: []const []const u8,
     path: []const u8,
@@ -361,7 +316,7 @@ fn parseDocument(
     return result;
 }
 
-// wow so many things can go wrong with computers
+/// wow so many things can go wrong with computers
 const ParseError = error{
     ProcessEndedUnexpectedly,
     SpanNotClosed,
@@ -376,15 +331,12 @@ fn ParseResult(comptime Type: type) type {
     };
 }
 
+/// Shorthand for building ParseResults
 fn ok(data: anytype, new_pos: usize) ParseResult(@TypeOf(data)) {
     return .{
         .data = data,
         .new_pos = new_pos,
     };
-}
-
-fn parseTitle(reader: anytype, allocator: *std.mem.Allocator) ![]const u8 {
-    return try reader.readUntilDelimiterAlloc(allocator, '\n', 1024);
 }
 
 fn parseInfo(lines: []const []const u8) !ParseResult(Info) {
@@ -417,6 +369,10 @@ fn parseInfo(lines: []const []const u8) !ParseResult(Info) {
     }, line);
 }
 
+/// The basic idea for blocks is: if it's not anything else, it's a paragraph.
+/// So, we try to parse various block patterns, and if nothing matches, we
+/// add a line of paragraph text which will be "flushed out" as soon as something
+/// DOES match (or the end of the file).
 fn parseBlocks(
     lines: []const []const u8,
     start: usize,
@@ -457,6 +413,9 @@ fn parseBlocks(
     return blocks.toOwnedSlice();
 }
 
+/// This is the fun stuff. Everything written inside of a command block is piped
+/// into the shell, and the output is then parsed as blocks like any other
+/// content. Not very much code and A LOT of power.
 fn parseCommand(
     lines: []const []const u8,
     start: usize,
@@ -496,10 +455,18 @@ fn parseCommand(
             allocator,
         );
         switch (try process.wait()) {
-            .Exited => return ok(
-                try parseBlocks(result_lines, 0, allocator),
-                res.new_pos,
-            ),
+            .Exited => |status| {
+                if (status != 0) {
+                    log.alert("Process ended unexpectedly on line {d}", .{
+                        res.new_pos,
+                    });
+                    return error.ProcessEndedUnexpectedly;
+                }
+                return ok(
+                    try parseBlocks(result_lines, 0, allocator),
+                    res.new_pos,
+                );
+            },
             else => return error.ProcessEndedUnexpectedly,
         }
     }
@@ -667,46 +634,12 @@ fn parseWrapper(
     return ok(@as([]const []const Span, paragraphs.toOwnedSlice()), line);
 }
 
-fn parseParagraph(
-    lines: []const []const u8,
-    l: usize,
-    prefix: ?[]const u8,
-    allocator: *std.mem.Allocator,
-) !?ParseResult([]const Span) {
-    var start = l;
-    while (lines[start].len == 0) {
-        start += 1;
-    }
-    var spans = std.ArrayList(Span).init(allocator);
-    errdefer spans.deinit();
-    const end = for (lines[start..]) |line, index| {
-        if (line.len == 0 or
-            line[0] == '!' or
-            std.mem.startsWith(u8, line, "# ") or
-            std.mem.startsWith(u8, line, "~ ") or
-            std.mem.startsWith(u8, line, "- ") or
-            std.mem.startsWith(u8, line, "  "))
-        {
-            if (index == 0) {
-                return null;
-            }
-            break start + index;
-        } else {
-            const result = (try parseSpans(line, 0, allocator, null)) orelse
-                continue;
-            if (index != 0) {
-                try spans.append(.br);
-            }
-            try spans.appendSlice(result.data);
-        }
-    } else lines.len;
-    const data = spans.toOwnedSlice();
-    for (data) |span| {}
-    return ParseResult([]const Span){
-        .data = data,
-        .new_pos = end,
-    };
-}
+/// Parsing spans applies the exact same principles as parsing blocks, except
+/// using column indexes in single lines instead of row index in lists of lines.
+/// With the exception of the outermost content, spans are usually wrapped in
+/// something (like *bold text*), and so you can provide the open and close
+/// arguments to nest span parsing so that something silly like *_*IMPORTANT*_*
+/// actually applies nested <strong><em><strong> tags.
 fn parseSpans(
     line: []const u8,
     start: usize,
@@ -787,6 +720,8 @@ fn parseAnchor(
 
 // ---- COMMON FORMATTING ----
 
+/// Pretty typical, you probably wouldn't even need to change this if you were
+/// altering the template.
 const html_preamble =
     \\<!DOCTYPE html>
     \\<html>
@@ -798,6 +733,7 @@ const html_preamble =
     \\
 ;
 
+/// Writes the document for the given render target.
 fn formatDoc(
     doc: Document,
     writer: anytype,
@@ -813,6 +749,8 @@ fn formatDoc(
 
 // ---- HTML FORMATTING ----
 
+/// If you want a differnt html template, because you don't want "Clarity Flowers"
+/// in the titlebar, this is the function you need to edit :)
 pub fn formatHtml(
     doc: Document,
     writer: anytype,
@@ -820,7 +758,9 @@ pub fn formatHtml(
     filename: []const u8,
 ) !void {
     try writer.writeAll(html_preamble);
-    try writer.print("<title>{0s} ~ Clarity's Blog</title>\n", .{doc.info.title});
+    try writer.print("<title>{0s} ~ Clarity Flowers</title>\n", .{
+        doc.info.title,
+    });
     try writer.writeAll(
         \\</head>
         \\<body>
@@ -939,9 +879,6 @@ fn formatBlockHtml(
             }
             try writer.writeAll("</pre>\n");
         },
-        .unknown_command => |command| {
-            try writer.print("UNKNOWN COMMAND: {s}\n", .{command});
-        },
     }
 }
 
@@ -1003,6 +940,7 @@ pub const HtmlText = struct {
 
 // ---- GEMINI FORMATTING ----
 
+/// Gemini is SO MUCH EASIER to generate, god.
 pub fn formatGmi(
     doc: Document,
     writer: anytype,
@@ -1086,9 +1024,6 @@ fn formatBlockGmi(
             }
             try writer.writeAll("```\n\n");
         },
-        .unknown_command => |command| {
-            try writer.print("UNKNOWN COMMAND: {s}\n", .{command});
-        },
     }
 }
 
@@ -1106,6 +1041,8 @@ fn formatSpanGmi(span: Span, writer: anytype) @TypeOf(writer).Error!void {
 
 // ---- INDEXING ----
 
+/// The 'sitegen index' command. Operates on collections of documents. Useful for
+/// building directories or feeds.
 fn buildIndex(
     exe_name: []const u8,
     args: []const []const u8,
@@ -1188,4 +1125,88 @@ fn formatIndexMarkup(writer: anytype, pages: []const Page) !void {
             page.info.title,
         });
     }
+}
+
+// ---- UTILS ----
+
+/// Gets all of the process's args, kindly splitting shortform options like
+/// -oPt into -o -P -t to make parsing easier.
+/// Caller owns both the outer and inner slices
+fn getArgs(
+    allocator: *std.mem.Allocator,
+) ![]const []const u8 {
+    var args = std.ArrayList([]const u8).init(allocator);
+    errdefer args.deinit();
+    errdefer for (args.items) |arg| allocator.free(arg);
+    var it = std.process.ArgIterator.init();
+    defer it.deinit();
+    while (it.next(allocator)) |next_or_err| {
+        const arg = try next_or_err;
+        defer allocator.free(arg);
+        if (std.mem.startsWith(u8, arg, "-") and
+            !std.mem.startsWith(u8, arg, "--") and
+            arg.len > 2)
+        {
+            for (arg[1..]) |char| {
+                const buffer = try allocator.alloc(u8, 2);
+                buffer[0] = '-';
+                buffer[1] = char;
+                try args.append(buffer[0..]);
+            }
+        } else {
+            try args.append(try allocator.dupe(u8, arg));
+        }
+    }
+    return args.toOwnedSlice();
+}
+
+/// Check if an arg equals the given longform or shortform
+fn getOpt(
+    arg: []const u8,
+    comptime long: []const u8,
+    comptime short: ?u8,
+) bool {
+    if (short) |char| {
+        if (std.mem.eql(u8, arg, "-" ++ &[1]u8{char})) {
+            return true;
+        }
+    }
+    return std.mem.eql(u8, arg, "--" ++ long);
+}
+
+/// Returns false if it hit the end of the stream
+fn readLine(reader: anytype, array_list: *std.ArrayList(u8)) !bool {
+    while (reader.readByte()) |byte| {
+        if (byte == '\n') return true;
+        try array_list.append(byte);
+    } else |err| switch (err) {
+        error.EndOfStream => return false,
+        else => |other_err| return other_err,
+    }
+}
+
+/// Using this line reader to consume documents is pretty important, because this
+/// is the stage where private lines are skipped over.
+/// Caller owns result
+fn readLines(
+    reader: anytype,
+    allocator: *std.mem.Allocator,
+) ![]const []const u8 {
+    var lines = std.ArrayList([]const u8).init(allocator);
+    var current_line = std.ArrayList(u8).init(allocator);
+    while (try readLine(reader, &current_line)) {
+        if (std.mem.startsWith(u8, current_line.items, "; ")) {
+            if (include_private) {
+                try lines.append(current_line.toOwnedSlice()[2..]);
+            } else {
+                current_line.shrinkRetainingCapacity(0);
+            }
+        } else {
+            try lines.append(current_line.toOwnedSlice());
+        }
+    }
+    if (current_line.items.len > 0) {
+        try lines.append(current_line.toOwnedSlice());
+    }
+    return lines.toOwnedSlice();
 }
