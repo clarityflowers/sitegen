@@ -154,16 +154,22 @@ fn renderFiles(
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    for (files) |file| {
-        const lines = try readLines(
-            src_dir,
-            file.filename,
-            &arena.allocator,
-        );
-        log.info("Rendering {s}/{s}", .{ gmi_out_path, file.filename });
+    for (files) |page| {
+        const lines = blk: {
+            const file = try src_dir.openFile(
+                page.filename,
+                .{ .read = true },
+            );
+            defer file.close();
+            break :blk try readLines(
+                file.reader(),
+                &arena.allocator,
+            );
+        };
+        log.info("Rendering {s}/{s}", .{ gmi_out_path, page.filename });
         const doc = try parseDocument(
             lines,
-            file.filename,
+            page.filename,
             &arena.allocator,
         );
         inline for (@typeInfo(Ext).Enum.fields) |fld| {
@@ -177,7 +183,7 @@ fn renderFiles(
             const out_filename = try std.mem.concat(
                 &arena.allocator,
                 u8,
-                &[_][]const u8{ file.filename, ".", fld.name },
+                &[_][]const u8{ page.filename, ".", fld.name },
             );
             defer arena.allocator.free(out_filename);
             const out_file = try blog_out_dir.createFile(out_filename, .{});
@@ -207,18 +213,11 @@ fn readLine(reader: anytype, array_list: *std.ArrayList(u8)) !bool {
 
 /// Caller owns result
 fn readLines(
-    src_dir: *std.fs.Dir,
-    filename: []const u8,
+    reader: anytype,
     allocator: *std.mem.Allocator,
 ) ![]const []const u8 {
     var lines = std.ArrayList([]const u8).init(allocator);
-    const file = try src_dir.openFile(
-        filename,
-        .{ .read = true },
-    );
-    defer file.close();
     var current_line = std.ArrayList(u8).init(allocator);
-    const reader = file.reader();
     while (try readLine(reader, &current_line)) {
         if (std.mem.startsWith(u8, current_line.items, "; ")) {
             if (include_private) {
@@ -312,45 +311,21 @@ fn parseDocument(
     errdefer errarena.deinit();
 
     const info_res = try parseInfo(lines);
-
-    var index = info_res.new_pos;
-    var blocks = std.ArrayList(Block).init(allocator);
-    var spans = std.ArrayList(Span).init(allocator);
-    while (index < lines.len) {
-        if (try parseBlock(lines, index, allocator)) |res| {
-            if (spans.items.len > 0) {
-                try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
-            }
-            try blocks.append(res.data);
-            index = res.new_pos;
-        } else if (spans.items.len > 0 and lines[index].len == 0) {
-            try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
-            index += 1;
-        } else if (std.mem.eql(u8, lines[index], "!end")) {
-            index += 1;
-        } else if (try parseSpans(lines[index], 0, allocator, null)) |res| {
-            index += 1;
-            if (spans.items.len > 0) {
-                try spans.append(.{ .br = {} });
-            }
-            try spans.appendSlice(res.data);
-        } else {
-            index += 1;
-        }
-    }
-    if (spans.items.len > 0) {
-        try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
-    }
+    const blocks = try parseBlocks(lines, info_res.new_pos, &errarena.allocator);
 
     const result: Document = .{
-        .blocks = blocks.toOwnedSlice(),
+        .blocks = blocks,
         .info = info_res.data,
         .filename = filename,
     };
     return result;
 }
 
-const ParseError = error{OutOfMemory};
+// wow so many things can go wrong with computers
+const ParseError = std.mem.Allocator.Error ||
+    std.process.GetEnvVarOwnedError || std.fs.File.ReadError ||
+    std.fs.File.WriteError || std.ChildProcess.SpawnError ||
+    error{ProcessEndedUnexpectedly};
 
 fn ParseResult(comptime Type: type) type {
     return struct {
@@ -400,7 +375,78 @@ fn parseInfo(lines: []const []const u8) !ParseResult(Info) {
     }, line);
 }
 
-fn parseBlock(lines: []const []const u8, line: usize, allocator: *std.mem.Allocator) !?ParseResult(Block) {
+fn parseBlocks(
+    lines: []const []const u8,
+    start: usize,
+    allocator: *std.mem.Allocator,
+) ParseError![]const Block {
+    var index = start;
+    var blocks = std.ArrayList(Block).init(allocator);
+    var spans = std.ArrayList(Span).init(allocator);
+    while (index < lines.len) {
+        if (try parseCommand(lines[index], allocator)) |res| {
+            try blocks.appendSlice(res);
+            index += 1;
+        } else if (try parseBlock(lines, index, allocator)) |res| {
+            if (spans.items.len > 0) {
+                try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
+            }
+            try blocks.append(res.data);
+            index = res.new_pos;
+        } else if (spans.items.len > 0 and lines[index].len == 0) {
+            try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
+            index += 1;
+        } else if (try parseSpans(lines[index], 0, allocator, null)) |res| {
+            index += 1;
+            if (spans.items.len > 0) {
+                try spans.append(.{ .br = {} });
+            }
+            try spans.appendSlice(res.data);
+        } else {
+            index += 1;
+        }
+    }
+    if (spans.items.len > 0) {
+        try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
+    }
+    return blocks.toOwnedSlice();
+}
+
+fn parseCommand(
+    line: []const u8,
+    allocator: *std.mem.Allocator,
+) !?[]const Block {
+    if (!std.mem.startsWith(u8, line, ": ")) return null;
+    const shell = try std.process.getEnvVarOwned(allocator, "SHELL");
+
+    var process = try std.ChildProcess.init(&[_][]const u8{shell}, allocator);
+    defer process.deinit();
+    process.stdin_behavior = .Pipe;
+    process.stdout_behavior = .Pipe;
+
+    try process.spawn();
+    errdefer _ = process.kill() catch |err| {
+        log.warn("Had trouble cleaning up process: {}", .{err});
+    };
+
+    try process.stdin.?.writer().writeAll(line[2..]);
+    process.stdin.?.close();
+    process.stdin = null;
+
+    const lines = try readLines(process.stdout.?.reader(), allocator);
+    switch (try process.wait()) {
+        .Exited => {
+            return try parseBlocks(lines, 0, allocator);
+        },
+        else => return error.ProcessEndedUnexpectedly,
+    }
+}
+
+fn parseBlock(
+    lines: []const []const u8,
+    line: usize,
+    allocator: *std.mem.Allocator,
+) !?ParseResult(Block) {
     if (try parseRaw(lines, line, allocator)) |res| {
         return ok(Block{ .raw = res.data }, res.new_pos);
     } else if (try parsePrefixedLines(lines, line, " ", allocator)) |res| {
