@@ -326,10 +326,12 @@ fn parseDocument(
 }
 
 // wow so many things can go wrong with computers
-const ParseError = std.mem.Allocator.Error ||
+const ParseError = error{
+    ProcessEndedUnexpectedly,
+    SpanNotClosed,
+} || std.mem.Allocator.Error ||
     std.process.GetEnvVarOwnedError || std.fs.File.ReadError ||
-    std.fs.File.WriteError || std.ChildProcess.SpawnError ||
-    error{ProcessEndedUnexpectedly};
+    std.fs.File.WriteError || std.ChildProcess.SpawnError;
 
 fn ParseResult(comptime Type: type) type {
     return struct {
@@ -389,6 +391,9 @@ fn parseBlocks(
     var spans = std.ArrayList(Span).init(allocator);
     while (index < lines.len) {
         if (try parseCommand(lines[index], allocator)) |res| {
+            if (spans.items.len > 0) {
+                try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
+            }
             try blocks.appendSlice(res);
             index += 1;
         } else if (try parseBlock(lines, index, allocator)) |res| {
@@ -400,7 +405,7 @@ fn parseBlocks(
         } else if (spans.items.len > 0 and lines[index].len == 0) {
             try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
             index += 1;
-        } else if (try parseSpans(lines[index], 0, allocator, null)) |res| {
+        } else if (try parseSpans(lines[index], 0, null, null, allocator)) |res| {
             index += 1;
             if (spans.items.len > 0) {
                 try spans.append(.{ .br = {} });
@@ -512,14 +517,20 @@ fn parseList(
     start: usize,
     allocator: *std.mem.Allocator,
     comptime symbol: []const u8,
-) std.mem.Allocator.Error!?ParseResult([]const []const Span) {
+) ParseError!?ParseResult([]const []const Span) {
     var ll = start;
     if (!std.mem.startsWith(u8, lines[ll], symbol)) return null;
     var items = std.ArrayList([]const Span).init(allocator);
     while (ll < lines.len and
         std.mem.startsWith(u8, lines[ll], symbol)) : (ll += 1)
     {
-        if (try parseSpans(lines[ll], symbol.len, allocator, null)) |result| {
+        if (try parseSpans(
+            lines[ll],
+            symbol.len,
+            null,
+            null,
+            allocator,
+        )) |result| {
             try items.append(result.data);
         } else {
             try items.append(&[0]Span{});
@@ -580,7 +591,13 @@ fn parseWrapper(
             if (spans.items.len > 0) {
                 try paragraphs.append(spans.toOwnedSlice());
             }
-        } else if (try parseSpans(lines[line], prefix.len, allocator, null)) |res| {
+        } else if (try parseSpans(
+            lines[line],
+            prefix.len,
+            null,
+            null,
+            allocator,
+        )) |res| {
             if (spans.items.len > 0) {
                 try spans.append(.br);
             }
@@ -636,35 +653,35 @@ fn parseParagraph(
 fn parseSpans(
     line: []const u8,
     start: usize,
+    comptime open: ?[]const u8,
+    comptime close: ?[]const u8,
     allocator: *std.mem.Allocator,
-    until: ?[]const u8,
-) std.mem.Allocator.Error!?ParseResult([]const Span) {
+) ParseError!?ParseResult([]const Span) {
     var col = start;
+    if (open) |match| {
+        if (!std.mem.startsWith(u8, line[col..], match)) return null;
+        col += match.len;
+    }
     var spans = std.ArrayList(Span).init(allocator);
     var text = std.ArrayList(u8).init(allocator);
     while (col < line.len) {
-        if (until) |match| {
+        if (close) |match| {
             if (std.mem.startsWith(u8, line[col..], match)) {
                 break;
             }
         }
-        if (try parseEmphasis(line, col, allocator)) |result| {
-            try spans.append(.{ .text = text.toOwnedSlice() });
-            try spans.append(.{ .emphasis = result.data });
-            col = result.new_pos;
-        } else if (try parseStrong(line, col, allocator)) |result| {
-            try spans.append(.{ .text = text.toOwnedSlice() });
-            try spans.append(.{ .strong = result.data });
-            col = result.new_pos;
-        } else if (try parseAnchor(line, col, allocator)) |result| {
-            try spans.append(.{ .text = text.toOwnedSlice() });
-            try spans.append(.{ .anchor = result.data });
-            col = result.new_pos;
+        if (try parseSpan(line, col, allocator)) |res| {
+            if (text.items.len > 0) {
+                try spans.append(.{ .text = text.toOwnedSlice() });
+            }
+            try spans.append(res.data);
+            col += res.new_pos;
         } else {
             try text.append(line[col]);
             col += 1;
         }
-    } else if (until != null) {
+    } else if (close) |match| {
+        // TODO there might be a minor memory leak here
         text.deinit();
         spans.deinit();
         return null;
@@ -672,47 +689,40 @@ fn parseSpans(
     if (text.items.len > 0) {
         try spans.append(.{ .text = text.toOwnedSlice() });
     }
-    return ok(@as([]const Span, spans.toOwnedSlice()), col);
+    const consumed = if (close) |match| col + match.len else col;
+    if (spans.items.len == 0) return null;
+    return ok(@as([]const Span, spans.toOwnedSlice()), consumed);
 }
 
-fn parseEmphasis(
+fn parseSpan(
     line: []const u8,
     start: usize,
     allocator: *std.mem.Allocator,
-) std.mem.Allocator.Error!?ParseResult([]const Span) {
-    if (line[start] != '_') return null;
-    const result = (try parseSpans(line, start + 1, allocator, "_")) orelse
-        return null;
-    return ok(result.data, result.new_pos + 1);
-}
-
-fn parseStrong(
-    line: []const u8,
-    start: usize,
-    allocator: *std.mem.Allocator,
-) std.mem.Allocator.Error!?ParseResult([]const Span) {
-    if (line[start] != '*') return null;
-    const result = (try parseSpans(line, start + 1, allocator, "*")) orelse
-        return null;
-    return ok(result.data, result.new_pos + 1);
+) ParseError!?ParseResult(Span) {
+    if (try parseSpans(line, start, "_", "_", allocator)) |result| {
+        return ok(Span{ .emphasis = result.data }, result.new_pos);
+    } else if (try parseSpans(line, start, "*", "*", allocator)) |result| {
+        return ok(Span{ .strong = result.data }, result.new_pos);
+    } else if (try parseAnchor(line, start, allocator)) |result| {
+        return ok(Span{ .anchor = result.data }, result.new_pos);
+    } else return null;
 }
 
 fn parseAnchor(
     line: []const u8,
     start: usize,
     allocator: *std.mem.Allocator,
-) std.mem.Allocator.Error!?ParseResult(Anchor) {
-    if (line[start] == '[') {
-        const result = (try parseSpans(line, start + 1, allocator, "](")) orelse
-            return null;
-        const end_index = (std.mem.indexOf(
+) ParseError!?ParseResult(Anchor) {
+    if (try parseSpans(line, start, "[", "](", allocator)) |res| {
+        const end_index = std.mem.indexOfPos(
             u8,
-            line[result.new_pos + 2 ..],
+            line,
+            res.new_pos,
             ")",
-        ) orelse return null) + result.new_pos + 2;
+        ) orelse return null;
         return ok(Anchor{
-            .text = result.data,
-            .url = line[result.new_pos + 2 .. end_index],
+            .text = res.data,
+            .url = line[res.new_pos..end_index],
         }, end_index + 1);
     }
     return null;
