@@ -29,6 +29,8 @@ Sitegen will generate /html and /gmi directories inside of the given out directo
   scp -r out/html/* username@clarity.flowers:/path/to/http/server &&\
   scp -r out/gmi/* username@clarity.flowers:/path/to/gmi/server
 
+Please note that these documents are full-fledged programs. Running sitegen on a document that you haven't vetted yourself is like running a shell script you got off the internet without making sure you know what it does.
+
 
 # Indexing
 
