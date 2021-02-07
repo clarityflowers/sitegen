@@ -1,0 +1,85 @@
+Site Generator
+Written 2021-02-04
+Updated 2021-02-06
+
+A tool for generating static html and gemtext pages from markdown-like source documents.
+
+=> https://github.com/clarityflowers/sitegen Source code
+
+By keeping the functionality simple and the code structure straightforward, adding and removing features becomes an inviting task. Rather than building a library of common tools or writing extensions or plugins, I want to keep the scope small enough that new variations for kinds of websites could be copy & paste clones with custom tweaks.
+
+: echo '  > sitegen --help'
+: echo '  '
+: sitegen --help | sed 's/.*/  &/'
+
+# Building the site
+
+: echo '  > sitegen make --help'
+: echo '  '
+: sitegen make --help | sed 's/.*/  &/'
+
+Sitegen will generate /html and /gmi directories inside of the given out directories. My publishing process looks something like:
+
+  rm -rf out
+  mkdir -p out/html out/gmi
+  cp -r public-html/* out/html/
+  cp -r public/* out/html/
+  cp -r public/* out/gmi
+  sitegen make out site && \
+  scp -r out/html/* username@clarity.flowers:/path/to/http/server &&\
+  scp -r out/gmi/* username@clarity.flowers:/path/to/gmi/server
+
+
+# Indexing
+
+: echo '  > sitegen index --help'
+: echo '  '
+: sitegen index --help | sed 's/.*/  &/'
+
+Indexing allows you to create lists of files inside of your site, which you can combine with the ability to run arbitrary commands inside of documents to produce in-page tables of contents.
+
+More options to come.
+
+: echo '  > sitegen index *'
+: echo '  '
+: sitegen index * | sed 's/.*/  &/'
+
+# Document format
+
+The first few lines of the file are the title and metadata, broken by an empty line.
+
+  Site Generator
+  Written 2021-02-04
+
+The remaining text comprises the document itself.
+
+What follows is a block of markup, and the result of that markup rendered inside this document.
+
+: set example 'Paragraphs are raw text separated by empty lines.
+: Newlines are carried-over in the final content, so you\'ll need an editor that support text wrapping for large blocks of text. Text can be _italic_ or *bold*. [Inline links](https://clarity.flowers) are supported but discouraged. All inline formatting renders as plaintext in gmi.
+: 
+: # Sub-section heading
+: 
+: - A list
+: - of items
+: 
+: => gemini://gemini.circumlunar.space/ A link
+: => computers.* A link to a document with same extension as this page
+: 
+: ## Sub-sub-section heading
+: 
+: .gmi Raw gemtext that will only show up in gemini documents
+: .html <p>Raw html that will only show up in html documents</p>
+: 
+: > quoted text
+: 
+:   preformatted text
+: 
+: ; this line is only included as part of the document when the --private option is passed
+: ; > private lines can be combined with the other formatting options
+: 
+: : echo "You can run arbitrary commands using _" $SHELL "_"'
+: echo $example | sed 's/.*/  &/'
+: echo ''
+: echo $example
+

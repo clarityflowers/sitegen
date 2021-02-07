@@ -8,6 +8,5 @@ build
 publish
 watch
 site/
-build2
 old/
 out/

@@ -46,6 +46,7 @@ pub fn main() anyerror!void {
         \\commands:
         \\  make  The main generation tool
         \\  index  Outputs site indexes in various formats
+        \\  docs   Print the sitegen documentation in sitegen format
     ;
     const stdout = std.io.getStdOut().writer();
     if (args.len <= 1) {
@@ -58,6 +59,8 @@ pub fn main() anyerror!void {
         try buildIndex(exe_name, args[2..], &gpa.allocator);
     } else if (std.mem.endsWith(u8, args[1], "help")) {
         try stdout.print(help, .{exe_name});
+    } else if (std.mem.eql(u8, args[1], "docs")) {
+        try stdout.writeAll(@embedFile("docs"));
     } else {
         log.alert("Unknown command {s}", .{args[1]});
         try stdout.print(help, .{exe_name});
@@ -798,6 +801,18 @@ pub fn formatHtml(
     try writer.writeAll(
         \\</main>
         \\<footer>
+        \\<p><a href="gemini://clarity.flowers
+    );
+    if (dirname) |dir| {
+        try writer.print("/{s}", .{dirname});
+    }
+    if (!std.mem.eql(u8, filename, "index")) {
+        try writer.print("/{s}.gmi", .{filename});
+    }
+    try writer.writeAll(
+        \\">This page is also available on gemini.</a>
+        \\(<a href="https://gemini.circumlunar.space/">What is gemini?</a>)
+        \\</p>
         \\<p> 
         \\  This color palette is 
         \\  <a href="https://www.colourlovers.com/palette/2598543/Let_Me_Be_Myself_*">
@@ -953,7 +968,7 @@ pub fn formatGmi(
             try writer.print(", updated {Month D, YYYY}", .{updated});
         }
     }
-    try writer.writeAll("\n");
+    try writer.writeAll("\n\n");
     for (doc.blocks) |block| try formatBlockGmi(block, writer);
     try writer.writeAll("\n");
 }
