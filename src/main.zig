@@ -44,7 +44,7 @@ pub fn main() anyerror!void {
     comptime const help = usage ++
         \\
         \\commands:
-        \\  make  The main generation tool
+        \\  make   The main generation tool
         \\  index  Outputs site indexes in various formats
         \\  docs   Print the sitegen documentation in sitegen format
     ;
@@ -100,7 +100,7 @@ fn make(
     while (index < args.len) : (index += 1) {
         if (getOpt(args[index], "private", 'p')) {
             include_private = true;
-            try env_map.set("INCLUDE_PRIVATE", "true");
+            try env_map.set("INCLUDE_PRIVATE", "--private");
         } else if (getOpt(args[index], "help", null)) {
             try std.io.getStdOut().writer().print(help, .{exe_name});
             return;
@@ -240,12 +240,6 @@ const Info = struct {
 const Change = struct {
     date: Date,
     what_changed: ?[]const u8 = null,
-};
-
-/// A document that has only had the metadata parsed, for indexing
-const Page = struct {
-    filename: []const u8,
-    info: Info,
 };
 
 /// A line-level block of text
@@ -1078,6 +1072,14 @@ fn formatSpanGmi(span: Span, writer: anytype) @TypeOf(writer).Error!void {
 
 // ---- INDEXING ----
 
+/// A document that has only had the metadata parsed, for indexing
+const IndexEntry = struct {
+    filename: []const u8,
+    date: Date,
+    event: union(enum) { written, updated: ?[]const u8 },
+    info: Info,
+};
+
 /// The 'sitegen index' command. Operates on collections of documents. Useful for
 /// building directories or feeds.
 fn buildIndex(
@@ -1091,20 +1093,44 @@ fn buildIndex(
     const usage =
         \\usage:
         \\  {0s} index [--help]
-        \\  {0s} index [-p] [--private] [--limit <num>] [--] <file> [<file>...]
+        \\  {0s} index [--private] [--limit <num>] [--updates | --additions] [--] 
+        \\    <file> [<file>...]
+    ;
+    const help = usage ++
+        \\
+        \\options:
+        \\  -p, --private            include private content in the list
+        \\  -l <num>, --limit <num>  limit the number of entries to the top num
+        \\  -u, --updates            only include updates (and not additions)
+        \\  -a, --additions          only include additions (and not updates)
     ;
     const stdout = std.io.getStdOut().writer();
     if (args.len == 0) {
         try stdout.print(usage, .{exe_name});
         return;
     }
+    var limit: ?usize = null;
+    var include_updates = true;
+    var include_additions = true;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
         if (getOpt(arg, "private", 'p')) {
             include_private = true;
         } else if (getOpt(arg, "help", null)) {
-            try stdout.print(usage, .{exe_name});
+            try stdout.print(help, .{exe_name});
             return;
+        } else if (getOpt(arg, "limit", 'l')) {
+            arg_i += 1;
+            limit = std.fmt.parseInt(usize, args[arg_i], 10) catch {
+                log.alert("Limit value must be positive integer, got: {s}", .{
+                    args[arg_i],
+                });
+                return error.BadArgs;
+            };
+        } else if (getOpt(arg, "updates", 'u')) {
+            include_additions = false;
+        } else if (getOpt(arg, "additions", 'a')) {
+            include_updates = false;
         } else if (getOpt(arg, "-", null)) {
             arg_i += 1;
             break;
@@ -1123,7 +1149,7 @@ fn buildIndex(
         try files.append(args[arg_i]);
     }
     const cwd = std.fs.cwd();
-    var pages = std.ArrayList(Page).init(&arena.allocator);
+    var pages = std.ArrayList(IndexEntry).init(&arena.allocator);
     for (files.items) |filename| {
         var file = try cwd.openFile(filename, .{});
         defer file.close();
@@ -1142,26 +1168,58 @@ fn buildIndex(
         var info = (try parseInfo(lines, allocator)).data;
         defer allocator.free(info.changes);
         if (info.private and !include_private) continue;
-        try pages.append(.{ .filename = filename, .info = info });
+        if (include_updates) {
+            for (info.changes) |change| {
+                try pages.append(.{
+                    .filename = filename,
+                    .info = info,
+                    .event = .{ .updated = change.what_changed },
+                    .date = change.date,
+                });
+            }
+        }
+        if (include_additions) {
+            try pages.append(.{
+                .filename = filename,
+                .info = info,
+                .event = .written,
+                .date = info.created,
+            });
+        }
     }
     const sortFn = struct {
-        fn earlierThan(context: void, lhs: Page, rhs: Page) bool {
-            return lhs.info.created.isBefore(rhs.info.created);
+        fn laterThan(context: void, lhs: IndexEntry, rhs: IndexEntry) bool {
+            const result = lhs.date.isAfter(rhs.date);
+            return result;
         }
-    }.earlierThan;
+    }.laterThan;
+    std.sort.sort(IndexEntry, pages.items, {}, sortFn);
+    if (limit) |limit_val| {
+        if (limit_val < pages.items.len) {
+            pages.shrinkAndFree(limit_val);
+        }
+    }
     try formatIndexMarkup(stdout, pages.items);
 }
 
-fn formatIndexMarkup(writer: anytype, pages: []const Page) !void {
+fn formatIndexMarkup(writer: anytype, pages: []const IndexEntry) !void {
     for (pages) |page| {
         if (page.info.private) {
             try writer.writeAll("; ");
         }
-        try writer.print("=> {s}.* {} – {s}\n", .{
+        try writer.print("=> {s}.* {} – {s}", .{
             page.filename,
             page.info.created,
             page.info.title,
         });
+        switch (page.event) {
+            .written => {},
+            .updated => |what_changed| {
+                const change = what_changed orelse "updated";
+                try writer.print(" – {s}", .{change});
+            },
+        }
+        try writer.writeByte('\n');
     }
 }
 

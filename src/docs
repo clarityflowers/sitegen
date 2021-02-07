@@ -1,6 +1,6 @@
 Site Generator
 Written 2021-02-04
-Updated 2021-02-06
+Updated 2021-02-06 Added a bunch of features
 
 A tool for generating static html and gemtext pages from markdown-like source documents.
 
@@ -38,8 +38,6 @@ Sitegen will generate /html and /gmi directories inside of the given out directo
 
 Indexing allows you to create lists of files inside of your site, which you can combine with the ability to run arbitrary commands inside of documents to produce in-page tables of contents.
 
-More options to come.
-
 : echo '  > sitegen index *'
 : echo '  '
 : sitegen index * | sed 's/.*/  &/'
@@ -50,6 +48,8 @@ The first few lines of the file are the title and metadata, broken by an empty l
 
   Site Generator
   Written 2021-02-04
+  Updated 2021-02-05 Added a bunch of features
+  Updated 2021-02-06 You can have multiple updates now
 
 The remaining text comprises the document itself.
 
