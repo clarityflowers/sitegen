@@ -233,8 +233,13 @@ const Document = struct {
 const Info = struct {
     title: []const u8,
     created: Date,
-    updated: ?Date = null,
+    changes: []const Change,
     private: bool = false,
+};
+
+const Change = struct {
+    date: Date,
+    what_changed: ?[]const u8 = null,
 };
 
 /// A document that has only had the metadata parsed, for indexing
@@ -309,7 +314,7 @@ fn parseDocument(
     var errarena = std.heap.ArenaAllocator.init(allocator);
     errdefer errarena.deinit();
 
-    const info_res = try parseInfo(lines);
+    const info_res = try parseInfo(lines, allocator);
     const blocks = try parseBlocks(lines, info_res.new_pos, &errarena.allocator);
 
     const result: Document = .{
@@ -342,20 +347,33 @@ fn ok(data: anytype, new_pos: usize) ParseResult(@TypeOf(data)) {
     };
 }
 
-fn parseInfo(lines: []const []const u8) !ParseResult(Info) {
-    comptime const created_prefix = "Written";
-    comptime const updated_prefix = "Updated";
+fn parseInfo(
+    lines: []const []const u8,
+    allocator: *std.mem.Allocator,
+) !ParseResult(Info) {
+    comptime const created_prefix = "Written ";
+    comptime const updated_prefix = "Updated ";
     if (lines.len == 0) return error.NoInfo;
     const title = lines[0];
     var created: ?Date = null;
-    var updated: ?Date = null;
+    var changes = std.ArrayList(Change).init(allocator);
+    errdefer changes.deinit();
     var line: usize = 1;
     var private = false;
     while (line < lines.len and lines[line].len > 0) : (line += 1) {
-        if (std.mem.startsWith(u8, lines[line], created_prefix ++ " ")) {
-            created = try Date.parse(lines[line][created_prefix.len + 1 ..]);
-        } else if (std.mem.startsWith(u8, lines[line], updated_prefix ++ " ")) {
-            updated = try Date.parse(lines[line][updated_prefix.len + 1 ..]);
+        if (std.mem.startsWith(u8, lines[line], created_prefix)) {
+            created = try Date.parse(lines[line][created_prefix.len..]);
+        } else if (std.mem.startsWith(u8, lines[line], updated_prefix)) {
+            var date = try Date.parse(lines[line][updated_prefix.len..]);
+            const what_changed_start = updated_prefix.len + "0000-00-00".len + 1;
+            if (lines[line].len > what_changed_start) {
+                try changes.append(.{
+                    .date = date,
+                    .what_changed = lines[line][what_changed_start..],
+                });
+            } else {
+                try changes.append(.{ .date = date });
+            }
         } else if (std.mem.eql(u8, lines[line], "Private")) {
             private = true;
         } else {
@@ -367,7 +385,7 @@ fn parseInfo(lines: []const []const u8) !ParseResult(Info) {
     return ok(Info{
         .title = title,
         .created = created orelse return error.NoCreatedDate,
-        .updated = updated,
+        .changes = changes.toOwnedSlice(),
         .private = private,
     }, line);
 }
@@ -788,8 +806,10 @@ pub fn formatHtml(
         \\
     , .{doc.info.title});
     try writer.print("Written {Month D, YYYY}", .{doc.info.created});
-    if (doc.info.updated) |updated| {
-        try writer.print(", updated {Month D, YYYY}", .{updated});
+    if (doc.info.changes.len > 0) {
+        try writer.print(", last changed {Month D, YYYY}", .{
+            doc.info.changes[doc.info.changes.len - 1].date,
+        });
     }
 
     try writer.writeAll(
@@ -964,8 +984,10 @@ pub fn formatGmi(
     try writer.print("# {s}\n", .{doc.info.title});
     if (include_writing_dates) {
         try writer.print("Written {Month D, YYYY}", .{doc.info.created});
-        if (doc.info.updated) |updated| {
-            try writer.print(", updated {Month D, YYYY}", .{updated});
+        if (doc.info.changes.len > 0) {
+            try writer.print(", last changed {Month D, YYYY}", .{
+                doc.info.changes[doc.info.changes.len - 1].date,
+            });
         }
     }
     try writer.writeAll("\n\n");
@@ -1069,7 +1091,7 @@ fn buildIndex(
     const usage =
         \\usage:
         \\  {0s} index [--help]
-        \\  {0s} index [-p] [--private] [--] <file> [<file>...]
+        \\  {0s} index [-p] [--private] [--limit <num>] [--] <file> [<file>...]
     ;
     const stdout = std.io.getStdOut().writer();
     if (args.len == 0) {
@@ -1117,7 +1139,8 @@ fn buildIndex(
             }
             break :blk lines.toOwnedSlice();
         };
-        var info = (try parseInfo(lines)).data;
+        var info = (try parseInfo(lines, allocator)).data;
+        defer allocator.free(info.changes);
         if (info.private and !include_private) continue;
         try pages.append(.{ .filename = filename, .info = info });
     }
