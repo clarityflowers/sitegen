@@ -503,8 +503,8 @@ fn parseBlock(
         return ok(Block{ .heading = heading }, line + 1);
     } else if (parseSubheading(lines[line])) |subheading| {
         return ok(Block{ .subheading = subheading }, line + 1);
-    } else if (try parseLinks(lines, line, allocator)) |res| {
-        return ok(Block{ .links = res.data }, res.new_pos);
+    } else if (try parseLink(lines[line])) |link| {
+        return ok(Block{ .link = link }, line + 1);
     } else if (try parseList(lines, line, allocator, "- ")) |res| {
         return ok(Block{ .list = res.data }, res.new_pos);
     } else return null;
@@ -579,40 +579,29 @@ fn parseList(
     return ok(@as([]const []const Span, items.toOwnedSlice()), ll);
 }
 
-fn parseLinks(
-    lines: []const []const u8,
-    start: usize,
-    allocator: *std.mem.Allocator,
-) !?ParseResult([]const Link) {
-    var line = start;
-    var result = std.ArrayList(Link).init(allocator);
-    while (line < lines.len and
-        std.mem.startsWith(u8, lines[line], "=> ")) : (line += 1)
-    {
-        const url_end = std.mem.indexOfPos(
-            u8,
-            lines[line],
-            3,
-            " ",
-        ) orelse return null;
-        const text = lines[line][url_end + 1 ..];
-        const url = lines[line][3..url_end];
+fn parseLink(line: []const u8) !?Link {
+    if (!std.mem.startsWith(u8, line, "=> ")) return null;
+    const url_end = std.mem.indexOfPos(
+        u8,
+        line,
+        3,
+        " ",
+    ) orelse return null;
+    const text = line[url_end + 1 ..];
+    const url = line[3..url_end];
 
-        if (std.mem.endsWith(u8, url, ".*")) {
-            try result.append(.{
-                .url = url[0 .. url.len - 2],
-                .text = text,
-                .auto_ext = true,
-            });
-        } else {
-            try result.append(.{
-                .url = url,
-                .text = text,
-            });
-        }
+    if (std.mem.endsWith(u8, url, ".*")) {
+        return Link{
+            .url = url[0 .. url.len - 2],
+            .text = text,
+            .auto_ext = true,
+        };
+    } else {
+        return Link{
+            .url = url,
+            .text = text,
+        };
     }
-    if (result.items.len == 0) return null;
-    return ok(@as([]const Link, result.toOwnedSlice()), line);
 }
 
 fn parseWrapper(
@@ -874,16 +863,14 @@ fn formatBlockHtml(
             },
             else => {},
         },
-        .links => |links| {
-            for (links) |link| {
-                const text = HtmlText.init(link.text orelse link.url);
-                const url = HtmlText.init(link.url);
-                try writer.print("<a href=\"{s}", .{url});
-                if (link.auto_ext) {
-                    try writer.writeAll(".html");
-                }
-                try writer.print("\">{s}</a>\n", .{text});
+        .link => |link| {
+            const text = HtmlText.init(link.text orelse link.url);
+            const url = HtmlText.init(link.url);
+            try writer.print("<a href=\"{s}", .{url});
+            if (link.auto_ext) {
+                try writer.writeAll(".html");
             }
+            try writer.print("\">{s}</a>\n", .{text});
         },
         .list => |list| {
             try writer.writeAll("<ul>\n");
@@ -1024,17 +1011,15 @@ fn formatBlockGmi(
             },
             else => {},
         },
-        .links => |links| {
-            for (links) |link| {
-                try writer.print("=> {s}", .{link.url});
-                if (link.auto_ext) {
-                    try writer.writeAll(".gmi");
-                }
-                if (link.text) |text| {
-                    try writer.print(" {s}", .{text});
-                }
-                try writer.writeByte('\n');
+        .link => |link| {
+            try writer.print("=> {s}", .{link.url});
+            if (link.auto_ext) {
+                try writer.writeAll(".gmi");
             }
+            if (link.text) |text| {
+                try writer.print(" {s}", .{text});
+            }
+            try writer.writeByte('\n');
         },
         .list => |list| {
             for (list) |item| {
