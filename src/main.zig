@@ -1025,7 +1025,6 @@ fn formatBlockGmi(
                 for (item) |span| try formatSpanGmi(span, " ", writer);
                 try writer.writeAll("\n");
             }
-            try writer.writeAll("\n");
         },
         .quote => |paragraphs| {
             for (paragraphs) |p, i| {
@@ -1039,7 +1038,7 @@ fn formatBlockGmi(
             for (lines) |line| {
                 try writer.print("{s}\n", .{line});
             }
-            try writer.writeAll("```\n\n");
+            try writer.writeAll("```\n");
         },
         .empty => {
             try writer.writeAll("\n");

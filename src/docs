@@ -57,10 +57,13 @@ The remaining text comprises the document itself.
 
 What follows is a block of markup, and the result of that markup rendered inside this document.
 
-: set example 'Paragraphs are raw text separated by empty lines.
+: set example 'Paragraphs are raw text.
+: 
+: An empty line separates paragraphs in html and is rendered literally in gemini.
 : Newlines are carried-over in the final content, so you\'ll need an editor that support text wrapping for large blocks of text. Text can be _italic_ or *bold*. [Inline links](https://clarity.flowers) are supported but discouraged. All inline formatting renders as plaintext in gmi.
 : 
-: # Sub-section heading
+: 
+: # Section heading
 : 
 : - A list
 : - of items
@@ -68,7 +71,7 @@ What follows is a block of markup, and the result of that markup rendered inside
 : => gemini://gemini.circumlunar.space/ A link
 : => computers.* A link to a document with same extension as this page
 : 
-: ## Sub-sub-section heading
+: ## Sub-section heading
 : 
 : .gmi Raw gemtext that will only show up in gemini documents
 : .html <p>Raw html that will only show up in html documents</p>
