@@ -250,8 +250,9 @@ const Block = union(enum) {
     subheading: []const u8,
     quote: []const []const Span,
     list: []const []const Span,
-    links: []const Link,
+    link: Link,
     preformatted: []const []const u8,
+    empty,
 };
 
 /// Text that should be copied as-is into the output IF the current rendering
@@ -409,9 +410,6 @@ fn parseBlocks(
             }
             try blocks.append(res.data);
             index = res.new_pos;
-        } else if (spans.items.len > 0 and lines[index].len == 0) {
-            try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
-            index += 1;
         } else if (try parseSpans(lines[index], 0, null, null, allocator)) |res| {
             index += 1;
             if (spans.items.len > 0) {
@@ -493,7 +491,9 @@ fn parseBlock(
     line: usize,
     allocator: *std.mem.Allocator,
 ) !?ParseResult(Block) {
-    if (try parseRaw(lines, line, allocator)) |res| {
+    if (lines[line].len == 0) {
+        return ok(Block{ .empty = {} }, line + 1);
+    } else if (try parseRaw(lines, line, allocator)) |res| {
         return ok(Block{ .raw = res.data }, res.new_pos);
     } else if (try parsePrefixedLines(lines, line, " ", allocator)) |res| {
         return ok(Block{ .preformatted = res.data }, res.new_pos);
@@ -811,6 +811,7 @@ pub fn formatHtml(
         \\</header>
         \\
     );
+
     for (doc.blocks) |block| try formatBlockHtml(block, writer);
     try writer.writeAll(
         \\</main>
@@ -825,7 +826,7 @@ pub fn formatHtml(
     }
     try writer.writeAll(
         \\">This page is also available on gemini.</a>
-        \\(<a href="https://gemini.circumlunar.space/">What is gemini?</a>)
+        \\(<a href="/wiki/gemini.html">What is gemini?</a>)
         \\</p>
         \\<p> 
         \\  This color palette is 
@@ -908,6 +909,7 @@ fn formatBlockHtml(
             }
             try writer.writeAll("</pre>\n");
         },
+        .empty => {},
     }
 }
 
@@ -999,7 +1001,7 @@ fn formatParagraphGmi(
         if (span == .br) try writer.writeAll(prefix);
         try formatSpanGmi(span, writer);
     }
-    try writer.writeAll("\n\n");
+    try writer.writeAll("\n");
 }
 
 fn formatBlockGmi(
@@ -1011,10 +1013,10 @@ fn formatBlockGmi(
             try formatParagraphGmi(paragraph, "", writer);
         },
         .heading => |heading| {
-            try writer.print("## {s}\n\n", .{heading});
+            try writer.print("## {s}\n", .{heading});
         },
         .subheading => |subheading| {
-            try writer.print("### {s}\n\n", .{subheading});
+            try writer.print("### {s}\n", .{subheading});
         },
         .raw => |raw| switch (raw.ext) {
             .gmi => for (raw.lines) |line| {
@@ -1033,7 +1035,6 @@ fn formatBlockGmi(
                 }
                 try writer.writeByte('\n');
             }
-            try writer.writeByte('\n');
         },
         .list => |list| {
             for (list) |item| {
@@ -1044,7 +1045,8 @@ fn formatBlockGmi(
             try writer.writeAll("\n");
         },
         .quote => |paragraphs| {
-            for (paragraphs) |p| {
+            for (paragraphs) |p, i| {
+                if (i != 0) try writer.writeAll("> \n");
                 try formatParagraphGmi(p, "> ", writer);
             }
         },
@@ -1054,6 +1056,9 @@ fn formatBlockGmi(
                 try writer.print("{s}\n", .{line});
             }
             try writer.writeAll("```\n\n");
+        },
+        .empty => {
+            try writer.writeAll("\n");
         },
     }
 }
@@ -1209,7 +1214,7 @@ fn formatIndexMarkup(writer: anytype, pages: []const IndexEntry) !void {
         }
         try writer.print("=> {s}.* {} – {s}", .{
             page.filename,
-            page.info.created,
+            page.date,
             page.info.title,
         });
         switch (page.event) {
