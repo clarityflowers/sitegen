@@ -980,13 +980,11 @@ pub fn formatGmi(
 
 fn formatParagraphGmi(
     spans: []const Span,
-    prefix: []const u8,
+    comptime br: []const u8,
     writer: anytype,
 ) !void {
-    try writer.writeAll(prefix);
     for (spans) |span| {
-        if (span == .br) try writer.writeAll(prefix);
-        try formatSpanGmi(span, writer);
+        try formatSpanGmi(span, br, writer);
     }
     try writer.writeAll("\n");
 }
@@ -997,7 +995,7 @@ fn formatBlockGmi(
 ) @TypeOf(writer).Error!void {
     switch (block) {
         .paragraph => |paragraph| {
-            try formatParagraphGmi(paragraph, "", writer);
+            try formatParagraphGmi(paragraph, "\n", writer);
         },
         .heading => |heading| {
             try writer.print("## {s}\n", .{heading});
@@ -1024,7 +1022,7 @@ fn formatBlockGmi(
         .list => |list| {
             for (list) |item| {
                 try writer.writeAll("* ");
-                for (item) |span| try formatSpanGmi(span, writer);
+                for (item) |span| try formatSpanGmi(span, " ", writer);
                 try writer.writeAll("\n");
             }
             try writer.writeAll("\n");
@@ -1032,7 +1030,8 @@ fn formatBlockGmi(
         .quote => |paragraphs| {
             for (paragraphs) |p, i| {
                 if (i != 0) try writer.writeAll("> \n");
-                try formatParagraphGmi(p, "> ", writer);
+                try writer.writeAll("> ");
+                try formatParagraphGmi(p, "\n> ", writer);
             }
         },
         .preformatted => |lines| {
@@ -1048,15 +1047,19 @@ fn formatBlockGmi(
     }
 }
 
-fn formatSpanGmi(span: Span, writer: anytype) @TypeOf(writer).Error!void {
+fn formatSpanGmi(
+    span: Span,
+    comptime br: []const u8,
+    writer: anytype,
+) @TypeOf(writer).Error!void {
     switch (span) {
         .text => |text| try writer.writeAll(text),
         .emphasis,
         .strong,
-        => |spans| for (spans) |sp| try formatSpanGmi(sp, writer),
+        => |spans| for (spans) |sp| try formatSpanGmi(sp, "", writer),
         .anchor => |anchor| for (anchor.text) |sp|
-            try formatSpanGmi(sp, writer),
-        .br => try writer.writeAll("\n"),
+            try formatSpanGmi(sp, "", writer),
+        .br => try writer.writeAll(br),
     }
 }
 
