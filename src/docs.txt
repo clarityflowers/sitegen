@@ -1,6 +1,7 @@
 Site Generator
 Written 2021-02-04
 Updated 2021-02-06 Added a bunch of features
+Updated 2021-02-16 Blank lines are now handled literally in gemini
 
 A tool for generating static html and gemtext pages from markdown-like source documents.
 
@@ -60,7 +61,9 @@ What follows is a block of markup, and the result of that markup rendered inside
 : set example 'Paragraphs are raw text.
 : 
 : An empty line separates paragraphs in html and is rendered literally in gemini.
-: Newlines are carried-over in the final content, so you\'ll need an editor that support text wrapping for large blocks of text. Text can be _italic_ or *bold*. [Inline links](https://clarity.flowers) are supported but discouraged. All inline formatting renders as plaintext in gmi.
+: Newlines are carried-over in the final content, so you\'ll need an editor that support text wrapping for large blocks of text. 
+: 
+: All inline formatting renders as plaintext in gmi, but in html text can be _italic_ or *bold*. [Inline links](https://clarity.flowers) are supported but discouraged. 
 : 
 : 
 : # Section heading
@@ -76,14 +79,16 @@ What follows is a block of markup, and the result of that markup rendered inside
 : .gmi Raw gemtext that will only show up in gemini documents
 : .html <p>Raw html that will only show up in html documents</p>
 : 
-: > quoted text
+: > Quoted text handles newlines the same way as paragraphs.
+: > 
+: > Just make sure to prefix blank lines with "> ", not ">". 
 : 
 :   preformatted text
 : 
 : ; this line is only included as part of the document when the --private option is passed
 : ; > private lines can be combined with the other formatting options
-: 
-: : echo "You can run arbitrary commands using _" $SHELL "_"'
+: ; 
+: : echo "You can run arbitrary commands using _" $SHELL "_ and the results will be parsed as though they were written into the document."'
 : echo $example | sed 's/.*/  &/'
 : echo ''
 : echo $example

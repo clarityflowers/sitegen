@@ -60,7 +60,7 @@ pub fn main() anyerror!void {
     } else if (std.mem.endsWith(u8, args[1], "help")) {
         try stdout.print(help, .{exe_name});
     } else if (std.mem.eql(u8, args[1], "docs")) {
-        try stdout.writeAll(@embedFile("docs"));
+        try stdout.writeAll(@embedFile("docs.txt"));
     } else {
         log.alert("Unknown command {s}", .{args[1]});
         try stdout.print(help, .{exe_name});
@@ -170,16 +170,18 @@ fn renderDir(
     var it = src_dir.iterate();
     while (try it.next()) |item| {
         if (item.kind != .File) continue;
+        if (!std.mem.endsWith(u8, item.name, ".txt")) continue;
         var arena = std.heap.ArenaAllocator.init(allocator);
+        const filename = item.name[0 .. item.name.len - 4];
         log.info("Generating {s}/{s}", .{
             dir_path,
-            item.name,
+            filename,
         });
         defer arena.deinit();
         const src_file = try src_dir.openFile(item.name, .{});
         defer src_file.close();
         const lines = try readLines(src_file.reader(), &arena.allocator);
-        const doc = try parseDocument(lines, item.name, &arena.allocator);
+        const doc = try parseDocument(lines, filename, &arena.allocator);
         if (doc.info.private and !include_private) continue;
         {
             try html_dir.makePath(dir_path);
@@ -188,14 +190,14 @@ fn renderDir(
             const out_filename = try std.mem.concat(
                 &arena.allocator,
                 u8,
-                &[_][]const u8{ item.name, ".html" },
+                &[_][]const u8{ filename, ".html" },
             );
             const out_file = try dir.createFile(
                 out_filename,
                 .{ .truncate = true },
             );
             defer out_file.close();
-            try formatHtml(doc, out_file.writer(), dirname, item.name);
+            try formatHtml(doc, out_file.writer(), dirname, filename);
         }
         {
             try gmi_dir.makePath(dir_path);
@@ -204,7 +206,7 @@ fn renderDir(
             const out_filename = try std.mem.concat(
                 &arena.allocator,
                 u8,
-                &[_][]const u8{ item.name, ".gmi" },
+                &[_][]const u8{ filename, ".gmi" },
             );
             const out_file = try dir.createFile(
                 out_filename,
@@ -1143,6 +1145,12 @@ fn buildIndex(
     const cwd = std.fs.cwd();
     var pages = std.ArrayList(IndexEntry).init(&arena.allocator);
     for (files.items) |filename| {
+        if (!std.mem.endsWith(u8, filename, ".txt")) {
+            log.warn("Invalid index file {s}, files must be .txt. Skipping.", .{
+                filename,
+            });
+            continue;
+        }
         var file = try cwd.openFile(filename, .{});
         defer file.close();
 
@@ -1160,10 +1168,12 @@ fn buildIndex(
         var info = (try parseInfo(lines, allocator)).data;
         defer allocator.free(info.changes);
         if (info.private and !include_private) continue;
+
+        const filename_no_ext = filename[0 .. filename.len - 4];
         if (include_updates) {
             for (info.changes) |change| {
                 try pages.append(.{
-                    .filename = filename,
+                    .filename = filename_no_ext,
                     .info = info,
                     .event = .{ .updated = change.what_changed },
                     .date = change.date,
@@ -1172,7 +1182,7 @@ fn buildIndex(
         }
         if (include_additions) {
             try pages.append(.{
-                .filename = filename,
+                .filename = filename_no_ext,
                 .info = info,
                 .event = .written,
                 .date = info.created,
