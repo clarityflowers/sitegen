@@ -2,6 +2,7 @@ Site Generator
 Written 2021-02-04
 Updated 2021-02-06 Added a bunch of features
 Updated 2021-02-16 Blank lines are now handled literally in gemini
+Updated 2021-02-21 Rewrote to a more conventional documation format.
 
 A tool for generating static html and gemtext pages from markdown-like source documents.
 
@@ -19,7 +20,7 @@ By keeping the functionality simple and the code structure straightforward, addi
 : echo '  '
 : sitegen make --help | sed 's/.*/  &/'
 
-Sitegen will generate /html and /gmi directories inside of the given out directories. My publishing process looks something like:
+The site generator will generate /html and /gmi directories inside of the given out directories. My publishing process looks something like:
 
   rm -rf out
   mkdir -p out/html out/gmi
@@ -30,7 +31,7 @@ Sitegen will generate /html and /gmi directories inside of the given out directo
   scp -r out/html/* username@clarity.flowers:/path/to/http/server &&\
   scp -r out/gmi/* username@clarity.flowers:/path/to/gmi/server
 
-Please note that these documents are full-fledged programs. Running sitegen on a document that you haven't vetted yourself is like running a shell script you got off the internet without making sure you know what it does. Use at your own risk.
+Please note that these documents are full-fledged programs. Running the site generator on a document that you haven't vetted yourself is like running a shell script you got off the internet without making sure you know what it does. Use at your own risk.
 
 
 # Indexing
@@ -41,55 +42,96 @@ Please note that these documents are full-fledged programs. Running sitegen on a
 
 Indexing allows you to create lists of files inside of your site, which you can combine with the ability to run arbitrary commands inside of documents to produce in-page tables of contents.
 
-: echo '  > sitegen index *'
+: echo '  > sitegen index --limit 5 *'
 : echo '  '
-: sitegen index * | sed 's/.*/  &/'
+: sitegen index --limit 5 * | sed 's/.*/  &/'
 
 # Document format
 
-Sitegen documents are UTF8-encoded .txt files, with newlines as line ending. The first few lines of the file are the title and metadata, broken by an empty line.
+Sitegen documents are UTF8-encoded .txt files, with newlines as line endings. The first few lines of the file are the title and metadata, broken by an empty line, followed by its contents.
+
+## Info
+
+The beginning of a document starts with the title and the date it was written, followed by optional metadata information.
 
   Site Generator
   Written 2021-02-04
+
+You can keep track of the history of updates to the page:
+
   Updated 2021-02-05 Added a bunch of features
   Updated 2021-02-06 You can have multiple updates now
 
-The remaining text comprises the document itself.
+You can also mark a page as private or unlisted
 
-What follows is a block of markup, and the result of that markup rendered inside this document.
+  Private
+  Unlisted
 
-: set example 'Paragraphs are raw text.
-: 
-: An empty line separates paragraphs in html and is rendered literally in gemini.
-: Newlines are carried-over in the final content, so you\'ll need an editor that support text wrapping for large blocks of text. 
-: 
-: All inline formatting renders as plaintext in gmi, but in html text can be _italic_ or *bold*. [Inline links](https://clarity.flowers) are supported but discouraged. 
-: 
-: 
-: # Section heading
-: 
-: - A list
-: - of items
-: 
-: => gemini://gemini.circumlunar.space/ A link
-: => computers.* A link to a document with same extension as this page
-: 
-: ## Sub-section heading
-: 
-: .gmi Raw gemtext that will only show up in gemini documents
-: .html <p>Raw html that will only show up in html documents</p>
-: 
-: > Quoted text handles newlines the same way as paragraphs.
-: > 
-: > Just make sure to prefix blank lines with "> ", not ">". 
-: 
-:   preformatted text
-: 
-: ; this line is only included as part of the document when the --private option is passed
-: ; > private lines can be combined with the other formatting options
-: ; 
-: : echo "You can run arbitrary commands using _" $SHELL "_ and the results will be parsed as though they were written into the document."'
-: echo $example | sed 's/.*/  &/'
-: echo ''
-: echo $example
+Private pages will only be generated if you include the "--private" option during generation. Unlisted pages will be generated, but won't show up during indexing.
 
+## Body
+
+The remaining text comprises the document itself. Documents are raw text with special "blocks" marked by prefixing a line with special characters.
+
+Raw text is copied literally in gemini, and separated into paragraphs by empty lines in html. Newlines are carried-over in the final content, so you'll need an editor that support text wrapping for large blocks of text.
+
+There are two levels of heading available:
+
+  # Section heading
+  ## Sub-section heading
+
+Links are written gemini-style.
+
+  => gemini://gemini.circumlunar.space/ About Gemini
+
+Links to internal documents need to have a different extension based on the output format. Using "*" as an extension will accomplish this.
+
+  => computers.* Computers
+
+Block quotes are formatted into paragraphs the same way raw text is:
+
+  > This line and...
+  > ... this one are all one paragraph within this quote block.
+  > 
+  > This is a separate paragraph in the same quote block.
+
+There is only a single style of list, with only one line allowed per entry:
+
+  - list
+  - items
+
+Preformatted text is preceded by two spaces:
+
+  Here is a code block:
+  
+    echo "hello world"
+
+Sometimes you'll want certain blocks to only be included in certain output formats. You can start the line with the given extension and write raw text that will be literally copied into matching documents.
+
+  .html <img src="/media/me.png" alt="A selfie"/>
+  .gmi => /media/me.png A selfie
+
+Lines prefixed with a semicolon are private. You can use them to keep track of personal notes that don't need to be shared, or to comment your documents. Private lines are only included in the final output if you pass the "--private" option during generation.
+
+  ; This is a private line
+
+Parsing for private lines happens during a pre-parsing step, which means your private lines can include formatting like any other.
+
+  ; => somewhere_secret.* A private link
+
+You can also run arbitrary commands with your shell and parse the output as formatted text!
+
+  : echo "# Hello world
+  : => hello.png Hello world!"
+
+This has pretty huge implications as it allows you to write "plugins" in any language that generate data without constraints. The shell is invoked with its working directory as the directory of the document file, and the "$FILE" environment variable is set to the name of the file (without the .txt) extension.
+
+A pattern I find myself using fairly often (including in this document) is to pipe the result of commands into sed in order to format the output as a preformatted block. 
+
+  : sitegen index --help | sed 's/.*/  &/'
+
+## Example
+
+For a complete example of a document, here is the source of the page you are currently reading:
+
+: sed 's/.*/  &/' {$FILE}.txt

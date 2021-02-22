@@ -233,10 +233,12 @@ const Document = struct {
 
 /// The metadata at the top of the document
 const Info = struct {
+    filename: []const u8,
     title: []const u8,
     created: Date,
     changes: []const Change,
     private: bool = false,
+    unlisted: bool = false,
 };
 
 const Change = struct {
@@ -311,8 +313,13 @@ fn parseDocument(
     var errarena = std.heap.ArenaAllocator.init(allocator);
     errdefer errarena.deinit();
 
-    const info_res = try parseInfo(lines, allocator);
-    const blocks = try parseBlocks(lines, info_res.new_pos, &errarena.allocator);
+    const info_res = try parseInfo(lines, path, allocator);
+    const blocks = try parseBlocks(
+        lines,
+        info_res.new_pos,
+        &errarena.allocator,
+        info_res.data,
+    );
 
     const result: Document = .{
         .blocks = blocks,
@@ -346,6 +353,7 @@ fn ok(data: anytype, new_pos: usize) ParseResult(@TypeOf(data)) {
 
 fn parseInfo(
     lines: []const []const u8,
+    filename: []const u8,
     allocator: *std.mem.Allocator,
 ) !ParseResult(Info) {
     comptime const created_prefix = "Written ";
@@ -357,6 +365,7 @@ fn parseInfo(
     errdefer changes.deinit();
     var line: usize = 1;
     var private = false;
+    var unlisted = false;
     while (line < lines.len and lines[line].len > 0) : (line += 1) {
         if (std.mem.startsWith(u8, lines[line], created_prefix)) {
             created = try Date.parse(lines[line][created_prefix.len..]);
@@ -373,6 +382,8 @@ fn parseInfo(
             }
         } else if (std.mem.eql(u8, lines[line], "Private")) {
             private = true;
+        } else if (std.mem.eql(u8, lines[line], "Unlisted")) {
+            unlisted = true;
         } else {
             log.alert("Could not parse info on line {}:", .{line});
             log.alert("{s}", .{lines[line]});
@@ -380,10 +391,12 @@ fn parseInfo(
         }
     }
     return ok(Info{
+        .filename = filename,
         .title = title,
         .created = created orelse return error.NoCreatedDate,
         .changes = changes.toOwnedSlice(),
         .private = private,
+        .unlisted = unlisted,
     }, line);
 }
 
@@ -395,12 +408,13 @@ fn parseBlocks(
     lines: []const []const u8,
     start: usize,
     allocator: *std.mem.Allocator,
+    info: Info,
 ) ParseError![]const Block {
     var index = start;
     var blocks = std.ArrayList(Block).init(allocator);
     var spans = std.ArrayList(Span).init(allocator);
     while (index < lines.len) {
-        if (try parseCommand(lines, index, allocator)) |res| {
+        if (try parseCommand(lines, index, allocator, info)) |res| {
             if (spans.items.len > 0) {
                 try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
             }
@@ -435,6 +449,7 @@ fn parseCommand(
     lines: []const []const u8,
     start: usize,
     allocator: *std.mem.Allocator,
+    info: Info,
 ) !?ParseResult([]const Block) {
     if (try parsePrefixedLines(
         lines,
@@ -450,6 +465,7 @@ fn parseCommand(
             allocator,
         );
         defer process.deinit();
+        try env_map.set("FILE", info.filename);
         process.env_map = &env_map;
         process.stdin_behavior = .Pipe;
         process.stdout_behavior = .Pipe;
@@ -478,7 +494,7 @@ fn parseCommand(
                     return error.ProcessEndedUnexpectedly;
                 }
                 return ok(
-                    try parseBlocks(result_lines, 0, allocator),
+                    try parseBlocks(result_lines, 0, allocator, info),
                     res.new_pos,
                 );
             },
@@ -1165,8 +1181,13 @@ fn buildIndex(
             }
             break :blk lines.toOwnedSlice();
         };
-        var info = (try parseInfo(lines, allocator)).data;
+        var info = (try parseInfo(
+            lines,
+            filename[0 .. filename.len - 4],
+            allocator,
+        )).data;
         defer allocator.free(info.changes);
+        if (info.unlisted) continue;
         if (info.private and !include_private) continue;
 
         const filename_no_ext = filename[0 .. filename.len - 4];
