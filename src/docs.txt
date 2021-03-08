@@ -3,6 +3,7 @@ Written 2021-02-04
 Updated 2021-02-06 Added a bunch of features
 Updated 2021-02-16 Blank lines are now handled literally in gemini
 Updated 2021-02-21 Rewrote to a more conventional documation format.
+Updated 2021-03-07 Added images
 
 A tool for generating static html and gemtext pages from markdown-like source documents.
 
@@ -84,6 +85,11 @@ Links are written gemini-style.
 
   => gemini://gemini.circumlunar.space/ About Gemini
 
+Images must include a title (which will be used for the gemini link) and alt text (which will be used in html).
+
+  !> a_selfie.png A selfie
+    A selfie of me, wearing a red dress.
+
 Links to internal documents need to have a different extension based on the output format. Using "*" as an extension will accomplish this.
 
   => computers.* Computers
@@ -108,8 +114,8 @@ Preformatted text is preceded by two spaces:
 
 Sometimes you'll want certain blocks to only be included in certain output formats. You can start the line with the given extension and write raw text that will be literally copied into matching documents.
 
-  .html <img src="/media/me.png" alt="A selfie"/>
-  .gmi => /media/me.png A selfie
+  .html <h1><img src="logo.png" alt="The logo for My Website"/></h1>
+  .gmi # My Website
 
 Lines prefixed with a semicolon are private. You can use them to keep track of personal notes that don't need to be shared, or to comment your documents. Private lines are only included in the final output if you pass the "--private" option during generation.
 
@@ -124,7 +130,7 @@ You can also run arbitrary commands with your shell and parse the output as form
   : echo "# Hello world
   : => hello.png Hello world!"
 
-This has pretty huge implications as it allows you to write "plugins" in any language that generate data without constraints. The shell is invoked with its working directory as the directory of the document file, and the "$FILE" environment variable is set to the name of the file (without the .txt) extension.
+This has pretty huge implications as it allows you to write "plugins" in any language that generate data without constraints. The shell is invoked with its working directory as the directory of the document file, and the "$FILE" environment variable is set to the name of the file (without the .txt extension.)
 
 A pattern I find myself using fairly often (including in this document) is to pipe the result of commands into sed in order to format the output as a preformatted block. 
 

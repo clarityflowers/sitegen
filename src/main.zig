@@ -20,6 +20,7 @@ const std = @import("std");
 const log = std.log.scoped(.website);
 const Date = @import("zig-date/src/main.zig").Date;
 
+pub const log_level = std.log.Level.info;
 /// Global variables aren't too hard to keep track of when you only have one file.
 var include_private = false;
 var env_map: std.BufMap = undefined;
@@ -257,6 +258,13 @@ const Block = union(enum) {
     link: Link,
     preformatted: []const []const u8,
     empty,
+    image: Image,
+};
+
+const Image = struct {
+    source: []const u8,
+    alt: []const u8,
+    title: []const u8,
 };
 
 /// Text that should be copied as-is into the output IF the current rendering
@@ -316,7 +324,7 @@ fn parseDocument(
     const info_res = try parseInfo(lines, path, allocator);
     const blocks = try parseBlocks(
         lines,
-        info_res.new_pos,
+        info_res.new_pos + 1,
         &errarena.allocator,
         info_res.data,
     );
@@ -525,6 +533,8 @@ fn parseBlock(
         return ok(Block{ .link = link }, line + 1);
     } else if (try parseList(lines, line, allocator, "- ")) |res| {
         return ok(Block{ .list = res.data }, res.new_pos);
+    } else if (try parseImage(lines, line)) |res| {
+        return ok(Block{ .image = res.data }, res.new_pos);
     } else return null;
 }
 
@@ -620,6 +630,19 @@ fn parseLink(line: []const u8) !?Link {
             .text = text,
         };
     }
+}
+
+fn parseImage(lines: []const []const u8, start: usize) !?ParseResult(Image) {
+    if (start + 1 >= lines.len) return null;
+    if (!std.mem.startsWith(u8, lines[start], "!> ")) return null;
+    if (!std.mem.startsWith(u8, lines[start + 1], "  ")) return null;
+    const url_end = std.mem.indexOfPos(u8, lines[start], 3, " ") orelse
+        return null;
+    return ok(Image{
+        .source = lines[start][3..url_end],
+        .title = lines[start][url_end + 1 ..],
+        .alt = lines[start + 1][2..],
+    }, start + 2);
 }
 
 fn parseWrapper(
@@ -823,6 +846,8 @@ pub fn formatHtml(
     try writer.writeAll(
         \\</main>
         \\<footer>
+        \\<a class="ring" href='https://webring.xxiivv.com/#random' target='_blank'><img src='https://webring.xxiivv.com/icon.black.svg'/></a>
+        \\<a class="ring" href='https://webring.recurse.com'><img src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGhlaWdodD0iMTEyNSIgd2lkdGg9IjkwMCI+PHBhdGggZD0iTTAgMGg5MDB2Njc1aC03NVY3NUg3NXY2MDBoODI1djc1SDB6bTAgOTAwaDkwMHYyMjVIMTUwdi03NWg3NXYtNzVoNzV2NzVoNzV2LTc1aDc1djc1aDc1di03NWg3NXY3NWg3NXYtNzVoNzV2LTc1aC03NXY3NWgtNzV2LTc1aC03NXY3NWgtNzV2LTc1aC03NXY3NWgtNzV2LTc1aC03NXY3NWgtNzV2MTUwSDB6bTc1LTc1aDc1MHY3NUg3NXptMjI1LTc1aDMwMHY3NUgzMDB6Ii8+PHBhdGggZD0iTTE1MCAxNTBoMTUwdjE1MGg3NXYtNzVoLTc1di03NWgxNTB2MTUwaDc1di03NWgtNzV2LTc1aDMwMHYyMjVINDUwdjc1aDE1MHYtNzVoMTUwdjIyNUgxNTBWMzc1aDc1djc1aDE1MHYtNzVIMTUwdi03NWg3NXYtNzVoLTc1eiIvPjwvc3ZnPg=='/></a>
         \\<p><a href="gemini://clarity.flowers
     );
     if (dirname) |dir| {
@@ -914,6 +939,12 @@ fn formatBlockHtml(
             }
             try writer.writeAll("</pre>\n");
         },
+        .image => |image| {
+            try writer.print("<img src=\"{s}\" alt=\"{s}\">\n", .{
+                image.source,
+                HtmlText.init(image.alt),
+            });
+        },
         .empty => {},
     }
 }
@@ -990,8 +1021,9 @@ pub fn formatGmi(
                 doc.info.changes[doc.info.changes.len - 1].date,
             });
         }
+        try writer.writeAll("\n");
     }
-    try writer.writeAll("\n\n");
+    try writer.writeAll("\n");
     for (doc.blocks) |block| try formatBlockGmi(block, writer);
     try writer.writeAll("\n");
 }
@@ -1057,6 +1089,9 @@ fn formatBlockGmi(
                 try writer.print("{s}\n", .{line});
             }
             try writer.writeAll("```\n");
+        },
+        .image => |image| {
+            try writer.print("=> {s} {s}\n", .{ image.source, image.title });
         },
         .empty => {
             try writer.writeAll("\n");
@@ -1299,7 +1334,9 @@ fn readLine(reader: anytype, array_list: *std.ArrayList(u8)) !bool {
         if (byte == '\n') return true;
         try array_list.append(byte);
     } else |err| switch (err) {
-        error.EndOfStream => return false,
+        error.EndOfStream => {
+            if (array_list.items.len > 0) return true else return false;
+        },
         else => |other_err| return other_err,
     }
 }
@@ -1323,9 +1360,6 @@ fn readLines(
         } else {
             try lines.append(current_line.toOwnedSlice());
         }
-    }
-    if (current_line.items.len > 0) {
-        try lines.append(current_line.toOwnedSlice());
     }
     return lines.toOwnedSlice();
 }
