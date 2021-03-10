@@ -207,3 +207,11 @@ as empty variables will always be skipped over.
 ## Content
 
 If the location of the content isn't included, the content will be rendered after the template (treating the whole template as a header). You can't include the content more than once.
+
+## Default templates
+
+html:
+: sitegen html_template | sed 's/.*/  &/'
+
+gemini:
+: sitegen gmi_template | sed 's/.*/  &/'

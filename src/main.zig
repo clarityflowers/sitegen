@@ -48,9 +48,11 @@ pub fn main() anyerror!void {
     comptime const help = usage ++
         \\
         \\commands:
-        \\  make   The main generation tool
-        \\  index  Outputs site indexes in various formats
-        \\  docs   Print the sitegen documentation in sitegen format
+        \\  make           The main generation tool
+        \\  index          Outputs site indexes in various formats
+        \\  docs           Print the sitegen documentation in sitegen format
+        \\  html_template  Print the default html template
+        \\  gmi_template  Print the default gmi template
     ;
     const stdout = std.io.getStdOut().writer();
     if (args.len <= 1) {
@@ -65,6 +67,10 @@ pub fn main() anyerror!void {
         try stdout.print(help, .{exe_name});
     } else if (std.mem.eql(u8, args[1], "docs")) {
         try stdout.writeAll(@embedFile("docs.txt"));
+    } else if (std.mem.eql(u8, args[1], "html_template")) {
+        try stdout.writeAll(@embedFile("default_template.html"));
+    } else if (std.mem.eql(u8, args[1], "gmi_template")) {
+        try stdout.writeAll(@embedFile("default_template.gmi"));
     } else {
         log.alert("Unknown command {s}", .{args[1]});
         try stdout.print(help, .{exe_name});
