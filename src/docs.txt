@@ -141,3 +141,68 @@ A pattern I find myself using fairly often (including in this document) is to pi
 For a complete example of a document, here is the source of the page you are currently reading:
 
 : sed 's/.*/  &/' {$FILE}.txt
+
+
+# Templates
+
+Documents are rendered into templates, which allow you to use variable escapes to insert your content and document metadata.
+
+## Variables
+
+The variables are as follows:
+
+  {{title}} The title you put at the top of your document
+  {{file}} The name of the output file, without any extension
+  {{dir}} The name of the file's directory (empty for root-level files)
+  {{written}} The written date of the file
+  {{updated}} The most recent updatede date of the file, if any
+  {{back}} The path to the file one level "higher" than this one: 
+    site/dir/file.html goes to site/dir/
+    site/dir/ goes to site/
+    site/file.html goes to site/
+    site/ is empty
+  {{back_text}} Text to populate back links
+    either "return home" or "{{dir}} index"
+  {{content}} The rendered document content
+
+## Date Formatting
+
+Dates can be formatted:
+
+  Written {{written|Weekday, Month D, YYYY}}
+  Written Monday, June 1, 2020
+
+The format options are:
+
+- D - the day as one or two digits (1, 3, 15)
+- DD - the day as two digits (01, 03, 15)
+- Weekday - the day of the week (Monday, Friday)
+- Day - the day of the week, short (Mon, Fri)
+- M - the month as one or two digits (1, 10)
+- MM - the month as two digits (01, 10)
+- Month - the month, written out (January, October)
+- Mon - the month, short (Jan, Oct)
+- YY - the year as two digits (98, 20)
+- YYYY - the year as four digits (1998, 2020)
+
+Any non-format characters will be copied literally.
+
+## Conditional Rendering
+
+You can render content conditionally by including a question mark inside variable escapes. All content inside (including more escapes) will only be rendered if that variable "exists". Some variables (like the title) will always exist, but others (like the updated date, back url, or directory) may need special care.
+
+  {{back?<a href="{{back}}">{{back_text}}</a>}}
+
+Note that
+
+  {{back?{{back}}}}
+
+is identical to
+
+  {{back}}
+
+as empty variables will always be skipped over. 
+
+## Content
+
+If the location of the content isn't included, the content will be rendered after the template (treating the whole template as a header). You can't include the content more than once.

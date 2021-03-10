@@ -20,7 +20,10 @@ const std = @import("std");
 const log = std.log.scoped(.website);
 const Date = @import("zig-date/src/main.zig").Date;
 
-pub const log_level = std.log.Level.info;
+pub const log_level = if (std.builtin.mode == .Debug)
+    std.log.Level.debug
+else
+    std.log.Level.info;
 /// Global variables aren't too hard to keep track of when you only have one file.
 var include_private = false;
 var env_map: std.BufMap = undefined;
@@ -81,7 +84,8 @@ fn make(
     var index: usize = 0;
     const usage =
         \\usage:
-        \\  {0s} make [-p] [--private] [--] <out_dir> [<site_dir>]
+        \\  {0s} make [-p] [--private] [--html <template>] [--gmi <template>]   
+        \\       [--] <out_dir> [<site_dir>]
         \\  {0s} make [--help]
         \\
     ;
@@ -93,11 +97,19 @@ fn make(
         \\options:
         \\  --help         show this text
         \\  -p, --private  include private content in the build
+        \\  --html <template>  render html output with the template
+        \\  --gmi <template>  render gmi output with the given template
     ;
     if (args.len == 0) {
         try std.io.getStdOut().writer().print(usage, .{exe_name});
         return;
     }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var gmi_template_file: ?[]const u8 = null;
+    var html_template_file: ?[]const u8 = null;
     while (index < args.len) : (index += 1) {
         if (getOpt(args[index], "private", 'p')) {
             include_private = true;
@@ -105,6 +117,12 @@ fn make(
         } else if (getOpt(args[index], "help", null)) {
             try std.io.getStdOut().writer().print(help, .{exe_name});
             return;
+        } else if (getOpt(args[index], "html", null)) {
+            index += 1;
+            html_template_file = args[index];
+        } else if (getOpt(args[index], "gmi", null)) {
+            index += 1;
+            gmi_template_file = args[index];
         } else if (getOpt(args[index], "", null)) {
             index += 1;
             break;
@@ -115,6 +133,28 @@ fn make(
             break;
         }
     }
+    const html_template = try parseTemplate(
+        if (html_template_file) |file|
+            try cwd.readFileAlloc(
+                &arena.allocator,
+                file,
+                1024 * 1024 * 1024,
+            )
+        else
+            @embedFile("default_template.html"),
+        &arena.allocator,
+    );
+    const gmi_template = try parseTemplate(
+        if (gmi_template_file) |file|
+            try cwd.readFileAlloc(
+                &arena.allocator,
+                file,
+                1024 * 1024 * 1024,
+            )
+        else
+            @embedFile("default_template.gmi"),
+        &arena.allocator,
+    );
     if (index >= args.len) {
         log.alert("Missing <out_dir> argument.", .{});
         try std.io.getStdOut().writer().print(usage, .{exe_name});
@@ -137,7 +177,15 @@ fn make(
     // Ensures that child processes work as you might expect
     try site_dir.setAsCwd();
     defer site_dir.close();
-    try renderDir(&site_dir, null, &html_dir, &gmi_dir, allocator);
+    try renderDir(
+        &site_dir,
+        null,
+        &html_dir,
+        &gmi_dir,
+        allocator,
+        &html_template,
+        &gmi_template,
+    );
     var it = site_dir.iterate();
     while (try it.next()) |item| {
         if (item.kind != .Directory) continue;
@@ -147,6 +195,8 @@ fn make(
             &html_dir,
             &gmi_dir,
             allocator,
+            &html_template,
+            &gmi_template,
         );
     }
 
@@ -160,6 +210,8 @@ fn renderDir(
     html_dir: *std.fs.Dir,
     gmi_dir: *std.fs.Dir,
     allocator: *std.mem.Allocator,
+    html_template: *const Template,
+    gmi_template: *const Template,
 ) !void {
     const dir_path = dirname orelse ".";
     var src_dir = try site_dir.openDir(
@@ -182,7 +234,12 @@ fn renderDir(
         const src_file = try src_dir.openFile(item.name, .{});
         defer src_file.close();
         const lines = try readLines(src_file.reader(), &arena.allocator);
-        const doc = try parseDocument(lines, filename, &arena.allocator);
+        const doc = try parseDocument(
+            lines,
+            filename,
+            dirname,
+            &arena.allocator,
+        );
         if (doc.info.private and !include_private) continue;
         {
             try html_dir.makePath(dir_path);
@@ -198,7 +255,12 @@ fn renderDir(
                 .{ .truncate = true },
             );
             defer out_file.close();
-            try formatHtml(doc, out_file.writer(), dirname, filename);
+            const writer = out_file.writer();
+            try formatTemplate(html_template.header, doc.info, writer);
+            for (doc.blocks) |block| {
+                try formatBlockHtml(block, writer);
+            }
+            try formatTemplate(html_template.footer, doc.info, writer);
         }
         {
             try gmi_dir.makePath(dir_path);
@@ -214,7 +276,12 @@ fn renderDir(
                 .{ .truncate = true },
             );
             defer out_file.close();
-            try formatGmi(doc, out_file.writer(), true);
+            const writer = out_file.writer();
+            try formatTemplate(gmi_template.header, doc.info, writer);
+            for (doc.blocks) |block| {
+                try formatBlockGmi(block, writer);
+            }
+            try formatTemplate(gmi_template.footer, doc.info, writer);
         }
     }
 }
@@ -235,6 +302,7 @@ const Document = struct {
 /// The metadata at the top of the document
 const Info = struct {
     filename: []const u8,
+    dir: ?[]const u8,
     title: []const u8,
     created: Date,
     changes: []const Change,
@@ -313,6 +381,7 @@ const Anchor = struct {
 fn parseDocument(
     lines: []const []const u8,
     path: []const u8,
+    dirname: ?[]const u8,
     allocator: *std.mem.Allocator,
 ) !Document {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -321,7 +390,7 @@ fn parseDocument(
     var errarena = std.heap.ArenaAllocator.init(allocator);
     errdefer errarena.deinit();
 
-    const info_res = try parseInfo(lines, path, allocator);
+    const info_res = try parseInfo(lines, path, dirname, allocator);
     const blocks = try parseBlocks(
         lines,
         info_res.new_pos + 1,
@@ -362,10 +431,9 @@ fn ok(data: anytype, new_pos: usize) ParseResult(@TypeOf(data)) {
 fn parseInfo(
     lines: []const []const u8,
     filename: []const u8,
+    dirname: ?[]const u8,
     allocator: *std.mem.Allocator,
 ) !ParseResult(Info) {
-    comptime const created_prefix = "Written ";
-    comptime const updated_prefix = "Updated ";
     if (lines.len == 0) return error.NoInfo;
     const title = lines[0];
     var created: ?Date = null;
@@ -375,11 +443,11 @@ fn parseInfo(
     var private = false;
     var unlisted = false;
     while (line < lines.len and lines[line].len > 0) : (line += 1) {
-        if (std.mem.startsWith(u8, lines[line], created_prefix)) {
-            created = try Date.parse(lines[line][created_prefix.len..]);
-        } else if (std.mem.startsWith(u8, lines[line], updated_prefix)) {
-            var date = try Date.parse(lines[line][updated_prefix.len..]);
-            const what_changed_start = updated_prefix.len + "0000-00-00".len + 1;
+        if (parseLiteral(lines[line], 0, "Written ")) |index| {
+            created = try Date.parse(lines[line][index..]);
+        } else if (parseLiteral(lines[line], 0, "Updated ")) |index| {
+            var date = try Date.parse(lines[line][index..]);
+            const what_changed_start = index + "0000-00-00".len + 1;
             if (lines[line].len > what_changed_start) {
                 try changes.append(.{
                     .date = date,
@@ -405,6 +473,7 @@ fn parseInfo(
         .changes = changes.toOwnedSlice(),
         .private = private,
         .unlisted = unlisted,
+        .dir = dirname,
     }, line);
 }
 
@@ -559,23 +628,21 @@ fn parsePrefixedLines(
     if (!std.mem.startsWith(u8, lines[start], prefix ++ " ")) return null;
     var line = start;
     var result = std.ArrayList([]const u8).init(allocator);
-    while (line < lines.len and std.mem.startsWith(
-        u8,
-        lines[line],
-        prefix ++ " ",
-    )) : (line += 1) {
-        try result.append(lines[line][prefix.len + 1 ..]);
+    while (line < lines.len) : (line += 1) {
+        if (parseLiteral(lines[line], 0, prefix ++ " ")) |index| {
+            try result.append(lines[line][index..]);
+        } else break;
     }
     return ok(@as([]const []const u8, result.toOwnedSlice()), line);
 }
 
 fn parseHeading(line: []const u8) ?[]const u8 {
-    if (std.mem.startsWith(u8, line, "# ")) return line[2..];
+    if (parseLiteral(line, 0, "# ")) |index| return line[index..];
     return null;
 }
 
 fn parseSubheading(line: []const u8) ?[]const u8 {
-    if (std.mem.startsWith(u8, line, "## ")) return line[3..];
+    if (parseLiteral(line, 0, "## ")) |index| return line[index..];
     return null;
 }
 
@@ -608,15 +675,15 @@ fn parseList(
 }
 
 fn parseLink(line: []const u8) !?Link {
-    if (!std.mem.startsWith(u8, line, "=> ")) return null;
+    const url_start = parseLiteral(line, 0, "=> ") orelse return null;
     const url_end = std.mem.indexOfPos(
         u8,
         line,
-        3,
+        url_start,
         " ",
     ) orelse return null;
     const text = line[url_end + 1 ..];
-    const url = line[3..url_end];
+    const url = line[url_start..url_end];
 
     if (std.mem.endsWith(u8, url, ".*")) {
         return Link{
@@ -634,14 +701,15 @@ fn parseLink(line: []const u8) !?Link {
 
 fn parseImage(lines: []const []const u8, start: usize) !?ParseResult(Image) {
     if (start + 1 >= lines.len) return null;
-    if (!std.mem.startsWith(u8, lines[start], "!> ")) return null;
-    if (!std.mem.startsWith(u8, lines[start + 1], "  ")) return null;
-    const url_end = std.mem.indexOfPos(u8, lines[start], 3, " ") orelse
+    const url_start = parseLiteral(lines[start], 0, "!> ") orelse return null;
+    const alt_start = parseLiteral(lines[start + 1], 0, "  ") orelse
+        return null;
+    const url_end = std.mem.indexOfPos(u8, lines[start], url_start, " ") orelse
         return null;
     return ok(Image{
-        .source = lines[start][3..url_end],
+        .source = lines[start][url_start..url_end],
         .title = lines[start][url_end + 1 ..],
-        .alt = lines[start + 1][2..],
+        .alt = lines[start + 1][alt_start..],
     }, start + 2);
 }
 
@@ -694,17 +762,12 @@ fn parseSpans(
 ) ParseError!?ParseResult([]const Span) {
     var col = start;
     if (open) |match| {
-        if (!std.mem.startsWith(u8, line[col..], match)) return null;
-        col += match.len;
+        col = parseLiteral(line, col, match) orelse return null;
     }
     var spans = std.ArrayList(Span).init(allocator);
     var text = std.ArrayList(u8).init(allocator);
     while (col < line.len) {
-        if (close) |match| {
-            if (std.mem.startsWith(u8, line[col..], match)) {
-                break;
-            }
-        }
+        if (close) |match| if (parseLiteral(line, col, match) != null) break;
         if (try parseSpan(line, col, allocator)) |res| {
             if (text.items.len > 0) {
                 try spans.append(.{ .text = text.toOwnedSlice() });
@@ -778,105 +841,7 @@ const html_preamble =
     \\
 ;
 
-/// Writes the document for the given render target.
-fn formatDoc(
-    doc: Document,
-    writer: anytype,
-    ext: Ext,
-    back_text: ?[]const u8,
-    include_dates: bool,
-) !void {
-    switch (ext) {
-        .html => return formatHtml(doc, writer, back_text, include_dates),
-        .gmi => return formatGmi(doc, writer, include_dates),
-    }
-}
-
 // ---- HTML FORMATTING ----
-
-/// If you want a differnt html template, because you don't want "Clarity Flowers"
-/// in the titlebar, this is the function you need to edit :)
-pub fn formatHtml(
-    doc: Document,
-    writer: anytype,
-    dirname: ?[]const u8,
-    filename: []const u8,
-) !void {
-    try writer.writeAll(html_preamble);
-    try writer.print("<title>{0s} ~ Clarity Flowers</title>\n", .{
-        doc.info.title,
-    });
-    try writer.writeAll(
-        \\</head>
-        \\<body>
-        \\
-    );
-    if (dirname) |dir| {
-        if (std.mem.eql(u8, filename, "index")) {
-            try writer.writeAll("<a href=\"..\">return home</a>");
-        } else {
-            try writer.print(
-                "<a href=\".\">{s} index</a>\n",
-                .{dir},
-            );
-        }
-    } else if (!std.mem.eql(u8, filename, "index")) {
-        try writer.writeAll("<a href=\".\">return home</a>");
-    }
-    try writer.writeAll("<main>\n");
-    try writer.print(
-        \\<header>
-        \\  <h1>{s}</h1>
-        \\
-    , .{doc.info.title});
-    try writer.print("Written {Month D, YYYY}", .{doc.info.created});
-    if (doc.info.changes.len > 0) {
-        try writer.print(", last changed {Month D, YYYY}", .{
-            doc.info.changes[doc.info.changes.len - 1].date,
-        });
-    }
-
-    try writer.writeAll(
-        \\
-        \\</header>
-        \\
-    );
-
-    for (doc.blocks) |block| try formatBlockHtml(block, writer);
-    try writer.writeAll(
-        \\</main>
-        \\<footer>
-        \\<a class="ring" href='https://webring.xxiivv.com/#random' target='_blank'><img src='https://webring.xxiivv.com/icon.black.svg'/></a>
-        \\<a class="ring" href='https://webring.recurse.com'><img src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGhlaWdodD0iMTEyNSIgd2lkdGg9IjkwMCI+PHBhdGggZD0iTTAgMGg5MDB2Njc1aC03NVY3NUg3NXY2MDBoODI1djc1SDB6bTAgOTAwaDkwMHYyMjVIMTUwdi03NWg3NXYtNzVoNzV2NzVoNzV2LTc1aDc1djc1aDc1di03NWg3NXY3NWg3NXYtNzVoNzV2LTc1aC03NXY3NWgtNzV2LTc1aC03NXY3NWgtNzV2LTc1aC03NXY3NWgtNzV2LTc1aC03NXY3NWgtNzV2MTUwSDB6bTc1LTc1aDc1MHY3NUg3NXptMjI1LTc1aDMwMHY3NUgzMDB6Ii8+PHBhdGggZD0iTTE1MCAxNTBoMTUwdjE1MGg3NXYtNzVoLTc1di03NWgxNTB2MTUwaDc1di03NWgtNzV2LTc1aDMwMHYyMjVINDUwdjc1aDE1MHYtNzVoMTUwdjIyNUgxNTBWMzc1aDc1djc1aDE1MHYtNzVIMTUwdi03NWg3NXYtNzVoLTc1eiIvPjwvc3ZnPg=='/></a>
-        \\<p><a href="gemini://clarity.flowers
-    );
-    if (dirname) |dir| {
-        try writer.print("/{s}", .{dirname});
-    }
-    if (!std.mem.eql(u8, filename, "index")) {
-        try writer.print("/{s}.gmi", .{filename});
-    }
-    try writer.writeAll(
-        \\">This page is also available on gemini.</a>
-        \\(<a href="/wiki/gemini.html">What is gemini?</a>)
-        \\</p>
-        \\<p> 
-        \\  This color palette is 
-        \\  <a href="https://www.colourlovers.com/palette/2598543/Let_Me_Be_Myself_*">
-        \\    Let Me Be Myself *
-        \\  </a>
-        \\  by 
-        \\  <a href="https://www.colourlovers.com/lover/sugar%21">sugar!</a>. 
-        \\  License: 
-        \\  <a href="https://creativecommons.org/licenses/by-nc-sa/3.0/">
-        \\    CC-BY-NC-SA 3.0
-        \\  </a>.
-        \\</p>
-        \\</body>
-        \\</html>
-        \\
-    );
-}
 
 fn formatBlockHtml(
     block: Block,
@@ -1006,27 +971,6 @@ pub const HtmlText = struct {
 };
 
 // ---- GEMINI FORMATTING ----
-
-/// Gemini is SO MUCH EASIER to generate, god.
-pub fn formatGmi(
-    doc: Document,
-    writer: anytype,
-    include_writing_dates: bool,
-) !void {
-    try writer.print("# {s}\n", .{doc.info.title});
-    if (include_writing_dates) {
-        try writer.print("Written {Month D, YYYY}", .{doc.info.created});
-        if (doc.info.changes.len > 0) {
-            try writer.print(", last changed {Month D, YYYY}", .{
-                doc.info.changes[doc.info.changes.len - 1].date,
-            });
-        }
-        try writer.writeAll("\n");
-    }
-    try writer.writeAll("\n");
-    for (doc.blocks) |block| try formatBlockGmi(block, writer);
-    try writer.writeAll("\n");
-}
 
 fn formatParagraphGmi(
     spans: []const Span,
@@ -1219,6 +1163,7 @@ fn buildIndex(
         var info = (try parseInfo(
             lines,
             filename[0 .. filename.len - 4],
+            std.fs.path.dirname(filename),
             allocator,
         )).data;
         defer allocator.free(info.changes);
@@ -1279,6 +1224,256 @@ fn formatIndexMarkup(writer: anytype, pages: []const IndexEntry) !void {
         }
         try writer.writeByte('\n');
     }
+}
+
+// ---- TEMPLATES ----
+
+const Template = struct {
+    header: []const TemplateNode,
+    footer: []const TemplateNode,
+};
+
+const TemplateNode = union(enum) {
+    text: []const u8,
+    variable: TemplateVariable,
+    conditional: TemplateConditional,
+};
+
+const TemplateVariableName = enum {
+    title,
+    file,
+    dir,
+    written,
+    updated,
+    back_text,
+    back,
+};
+
+const TemplateVariable = struct {
+    name: TemplateVariableName,
+    format: ?[]const u8 = null,
+};
+
+const TemplateConditional = struct {
+    name: TemplateVariableName,
+    output: []const TemplateNode,
+};
+
+fn parseTemplate(text: []const u8, allocator: *std.mem.Allocator) !Template {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    var index: usize = 0;
+    var text_start = index;
+    var header = std.ArrayList(TemplateNode).init(&arena.allocator);
+    var footer = std.ArrayList(TemplateNode).init(&arena.allocator);
+    var parsed_header = false;
+    var result = &header;
+    while (index < text.len) {
+        if (parseLiteral(text, index, "{{content}}")) |new_pos| {
+            if (index > text_start) {
+                try header.append(.{ .text = text[text_start..index] });
+            }
+            index = new_pos;
+            text_start = index;
+            break;
+        } else if (try parseTemplateVariable(
+            text,
+            index,
+            &arena.allocator,
+        )) |res| {
+            if (index > text_start) {
+                try header.append(.{ .text = text[text_start..index] });
+            }
+            index = res.new_pos;
+            text_start = index;
+            try header.append(res.data);
+        } else {
+            index += 1;
+        }
+    }
+    if (index > text_start) {
+        try header.append(.{ .text = text[text_start..index] });
+    }
+    while (index < text.len) {
+        if (try parseTemplateVariable(
+            text,
+            index,
+            &arena.allocator,
+        )) |res| {
+            if (index > text_start) {
+                try footer.append(.{ .text = text[text_start..index] });
+            }
+            index = res.new_pos;
+            text_start = index;
+            try footer.append(res.data);
+        } else {
+            index += 1;
+        }
+    }
+    if (index > text_start) {
+        try footer.append(.{ .text = text[text_start..index] });
+    }
+    return Template{
+        .header = header.toOwnedSlice(),
+        .footer = footer.toOwnedSlice(),
+    };
+}
+
+fn parseTemplateVariableName(
+    text: []const u8,
+    start: usize,
+) ?ParseResult(TemplateVariableName) {
+    if (start >= text.len) return null;
+    inline for (@typeInfo(TemplateVariableName).Enum.fields) |fld| {
+        if (parseLiteral(text, start, fld.name)) |index| {
+            return ok(@field(TemplateVariableName, fld.name), index);
+        }
+    }
+    return null;
+}
+
+fn parseTemplateVariableFormat(
+    text: []const u8,
+    start: usize,
+) ?ParseResult([]const u8) {
+    if (start >= text.len) return null;
+    const text_start = parseLiteral(text, start, "|") orelse return null;
+    const text_end = std.mem.indexOfPos(u8, text, text_start, "}}") orelse
+        return null;
+    return ok(text[text_start..text_end], text_end + 2);
+}
+
+fn parseTemplateConditional(
+    text: []const u8,
+    start: usize,
+    allocator: *std.mem.Allocator,
+) std.mem.Allocator.Error!?ParseResult([]const TemplateNode) {
+    var index = parseLiteral(text, start, "?") orelse return null;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    var text_start = index;
+    var result = std.ArrayList(TemplateNode).init(&arena.allocator);
+    while (index < text.len) {
+        if (parseLiteral(text, index, "}}")) |new_index| {
+            if (index > text_start) {
+                try result.append(.{ .text = text[text_start..index] });
+            }
+            return ok(
+                @as([]const TemplateNode, result.toOwnedSlice()),
+                new_index,
+            );
+        } else if (try parseTemplateVariable(
+            text,
+            index,
+            &arena.allocator,
+        )) |res| {
+            if (index > text_start) {
+                try result.append(.{ .text = text[text_start..index] });
+            }
+            index = res.new_pos;
+            text_start = index;
+            try result.append(res.data);
+        } else {
+            index += 1;
+        }
+    }
+    arena.deinit();
+    return null;
+}
+
+fn parseTemplateVariable(
+    text: []const u8,
+    start: usize,
+    allocator: *std.mem.Allocator,
+) std.mem.Allocator.Error!?ParseResult(TemplateNode) {
+    var index = start;
+    index = parseLiteral(text, index, "{{") orelse return null;
+    const name_res = parseTemplateVariableName(text, index) orelse return null;
+
+    index = name_res.new_pos;
+    if (parseTemplateVariableFormat(text, index)) |format_res| {
+        return ok(TemplateNode{
+            .variable = .{
+                .name = name_res.data,
+                .format = format_res.data,
+            },
+        }, format_res.new_pos);
+    } else if (try parseTemplateConditional(
+        text,
+        index,
+        allocator,
+    )) |cond_res| {
+        return ok(TemplateNode{
+            .conditional = .{
+                .name = name_res.data,
+                .output = cond_res.data,
+            },
+        }, cond_res.new_pos);
+    }
+    const end_index = parseLiteral(text, index, "}}") orelse return null;
+    return ok(TemplateNode{ .variable = .{ .name = name_res.data } }, end_index);
+}
+
+fn formatTemplate(
+    template: []const TemplateNode,
+    info: Info,
+    writer: anytype,
+) @TypeOf(writer).Error!void {
+    for (template) |node| switch (node) {
+        .text => |text| try writer.writeAll(text),
+        .variable => |variable| switch (variable.name) {
+            .written => {
+                try info.created.formatRuntime(
+                    variable.format orelse "",
+                    writer,
+                );
+            },
+            .updated => {
+                if (info.changes.len > 0) {
+                    try info.changes[0].date.formatRuntime(
+                        variable.format orelse "",
+                        writer,
+                    );
+                }
+            },
+            .title => try writer.writeAll(info.title),
+            .file => try writer.writeAll(info.filename),
+            .dir => if (info.dir) |dir| try writer.writeAll(dir),
+            .back => {
+                try writer.writeByte('.');
+                if (info.dir) |dir| {
+                    if (std.mem.eql(u8, info.filename, "index")) {
+                        try writer.writeByte('.');
+                    }
+                }
+            },
+            .back_text => {
+                if (info.dir) |dir| {
+                    if (std.mem.eql(u8, info.filename, "index")) {
+                        try writer.writeAll("return home");
+                    } else {
+                        try writer.print("{s} index", .{dir});
+                    }
+                } else if (!std.mem.eql(u8, info.filename, "index")) {
+                    try writer.writeAll("return home");
+                }
+            },
+        },
+        .conditional => |conditional| {
+            if (switch (conditional.name) {
+                .written, .title, .file, .back_text => true,
+                .dir => info.dir != null,
+                .back => info.dir != null or !std.mem.eql(
+                    u8,
+                    info.filename,
+                    "index",
+                ),
+                .updated => info.changes.len > 0,
+            }) {
+                try formatTemplate(conditional.output, info, writer);
+            }
+        },
+    };
 }
 
 // ---- UTILS ----
@@ -1362,4 +1557,14 @@ fn readLines(
         }
     }
     return lines.toOwnedSlice();
+}
+
+fn parseLiteral(
+    text: []const u8,
+    start: usize,
+    literal: []const u8,
+) ?usize {
+    if (start >= text.len) return null;
+    if (!std.mem.startsWith(u8, text[start..], literal)) return null;
+    return start + literal.len;
 }

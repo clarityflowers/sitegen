@@ -1,0 +1,3 @@
+# {{title}}
+Written {{written|Month D, YYYY}}{{updated?, last changed {{updated|Month D, YYYY}}}}
+

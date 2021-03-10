@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" type="text/css" href="/style.css" />
+<link rel="icon" type="image/png" href="assets/favicon.png" />
+<title>{{title}}</title>
+</head>
+<body>
+{{back?<a href="{{back}}">{{back_text}}</a>}}
+<main>
+<header>
+  <h1>{{title}}</h1>
+  Written {{written|Month D, YYYY}}{{updated?, last changed {{updated|Month D, YYYY}}}}
+</header>
+{{content}}
+</main>
+</body>
+</html>
