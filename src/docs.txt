@@ -4,6 +4,7 @@ Updated 2021-02-06 Added a bunch of features
 Updated 2021-02-16 Blank lines are now handled literally in gemini
 Updated 2021-02-21 Rewrote to a more conventional documation format.
 Updated 2021-03-07 Added images
+Updated 2021-03-09 Added templates
 
 A tool for generating static html and gemtext pages from markdown-like source documents.
 
