@@ -232,10 +232,6 @@ fn renderDir(
         if (!std.mem.endsWith(u8, item.name, ".txt")) continue;
         var arena = std.heap.ArenaAllocator.init(allocator);
         const filename = item.name[0 .. item.name.len - 4];
-        log.info("Generating {s}/{s}", .{
-            dir_path,
-            filename,
-        });
         defer arena.deinit();
         const src_file = try src_dir.openFile(item.name, .{});
         defer src_file.close();
@@ -247,6 +243,11 @@ fn renderDir(
             &arena.allocator,
         );
         if (doc.info.private and !include_private) continue;
+
+        log.info("Generating {s}/{s}", .{
+            dir_path,
+            filename,
+        });
         {
             try html_dir.makePath(dir_path);
             var dir = try html_dir.openDir(dir_path, .{});
@@ -1436,7 +1437,7 @@ fn formatTemplate(
             },
             .updated => {
                 if (info.changes.len > 0) {
-                    try info.changes[0].date.formatRuntime(
+                    try info.changes[info.changes.len - 1].date.formatRuntime(
                         variable.format orelse "",
                         writer,
                     );
