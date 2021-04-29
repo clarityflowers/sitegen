@@ -1217,7 +1217,7 @@ fn formatIndexMarkup(writer: anytype, pages: []const IndexEntry) !void {
         if (page.info.private) {
             try writer.writeAll("; ");
         }
-        try writer.print("=> {s}.* {} – {s}", .{
+        try writer.print("=> {s}.* {} – {s}", .{
             page.filename,
             page.date,
             page.info.title,
