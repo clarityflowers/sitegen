@@ -121,6 +121,7 @@ fn make(
             include_private = true;
             try env_map.set("INCLUDE_PRIVATE", "--private");
         } else if (getOpt(args[index], "help", null)) {
+            @setEvalBranchQuota(2000);
             try std.io.getStdOut().writer().print(help, .{exe_name});
             return;
         } else if (getOpt(args[index], "html", null)) {
@@ -236,6 +237,11 @@ fn renderDir(
         const src_file = try src_dir.openFile(item.name, .{});
         defer src_file.close();
         const lines = try readLines(src_file.reader(), &arena.allocator);
+
+        log.info("Generating {s}/{s}", .{
+            dir_path,
+            filename,
+        });
         const doc = try parseDocument(
             lines,
             filename,
@@ -244,10 +250,6 @@ fn renderDir(
         );
         if (doc.info.private and !include_private) continue;
 
-        log.info("Generating {s}/{s}", .{
-            dir_path,
-            filename,
-        });
         {
             try html_dir.makePath(dir_path);
             var dir = try html_dir.openDir(dir_path, .{});
@@ -1113,6 +1115,7 @@ fn buildIndex(
         if (getOpt(arg, "private", 'p')) {
             include_private = true;
         } else if (getOpt(arg, "help", null)) {
+            @setEvalBranchQuota(2000);
             try stdout.print(help, .{exe_name});
             return;
         } else if (getOpt(arg, "limit", 'l')) {
@@ -1167,6 +1170,7 @@ fn buildIndex(
             }
             break :blk lines.toOwnedSlice();
         };
+        log.debug("Adding {s} to index", .{filename});
         var info = (try parseInfo(
             lines,
             filename[0 .. filename.len - 4],
@@ -1206,7 +1210,7 @@ fn buildIndex(
     std.sort.sort(IndexEntry, pages.items, {}, sortFn);
     if (limit) |limit_val| {
         if (limit_val < pages.items.len) {
-            pages.shrinkAndFree(limit_val);
+            pages.shrink(limit_val);
         }
     }
     try formatIndexMarkup(stdout, pages.items);
