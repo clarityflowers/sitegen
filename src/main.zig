@@ -184,44 +184,52 @@ fn make(
     // Ensures that child processes work as you might expect
     try site_dir.setAsCwd();
     defer site_dir.close();
+    const render_options: RenderOptions = .{
+        .site_dir = &site_dir,
+        .html = .{
+            .dir = &html_dir,
+            .template = &html_template,
+        },
+        .gmi = .{
+            .dir = &gmi_dir,
+            .template = &gmi_template,
+        },
+        .allocator = allocator,
+    };
     try renderDir(
-        &site_dir,
+        render_options,
         null,
-        &html_dir,
-        &gmi_dir,
-        allocator,
-        &html_template,
-        &gmi_template,
     );
     var it = site_dir.iterate();
     while (try it.next()) |item| {
         if (item.kind != .Directory) continue;
         try renderDir(
-            &site_dir,
+            render_options,
             item.name,
-            &html_dir,
-            &gmi_dir,
-            allocator,
-            &html_template,
-            &gmi_template,
         );
     }
 
     log.info("Done!", .{});
 }
 
+pub const RenderOptions = struct {
+    site_dir: *std.fs.Dir,
+    html: RenderFormatOptions,
+    gmi: RenderFormatOptions,
+    allocator: *std.mem.Allocator,
+};
+pub const RenderFormatOptions = struct {
+    dir: *std.fs.Dir,
+    template: *const Template,
+};
+
 /// Iterate over all files in a directory and render their output for each target
 fn renderDir(
-    site_dir: *std.fs.Dir,
+    options: RenderOptions,
     dirname: ?[]const u8,
-    html_dir: *std.fs.Dir,
-    gmi_dir: *std.fs.Dir,
-    allocator: *std.mem.Allocator,
-    html_template: *const Template,
-    gmi_template: *const Template,
 ) !void {
     const dir_path = dirname orelse ".";
-    var src_dir = try site_dir.openDir(
+    var src_dir = try options.site_dir.openDir(
         dir_path,
         .{ .iterate = true },
     );
@@ -231,7 +239,7 @@ fn renderDir(
     while (try it.next()) |item| {
         if (item.kind != .File) continue;
         if (!std.mem.endsWith(u8, item.name, ".txt")) continue;
-        var arena = std.heap.ArenaAllocator.init(allocator);
+        var arena = std.heap.ArenaAllocator.init(options.allocator);
         const filename = item.name[0 .. item.name.len - 4];
         defer arena.deinit();
         const src_file = try src_dir.openFile(item.name, .{});
@@ -249,10 +257,13 @@ fn renderDir(
             &arena.allocator,
         );
         if (doc.info.private and !include_private) continue;
-
-        {
-            try html_dir.makePath(dir_path);
-            var dir = try html_dir.openDir(dir_path, .{});
+        inline for (.{
+            .{ .field = "html", .function = formatBlockHtml },
+            .{ .field = "gmi", .function = formatBlockGmi },
+        }) |fmt| {
+            const fmt_options = @field(options, fmt.field);
+            try fmt_options.dir.makePath(dir_path);
+            var dir = try fmt_options.dir.openDir(dir_path, .{});
             defer dir.close();
             const out_filename = try std.mem.concat(
                 &arena.allocator,
@@ -265,32 +276,11 @@ fn renderDir(
             );
             defer out_file.close();
             const writer = out_file.writer();
-            try formatTemplate(html_template.header, doc.info, writer);
+            try formatTemplate(fmt_options.template.header, doc.info, writer);
             for (doc.blocks) |block| {
-                try formatBlockHtml(block, writer);
+                try fmt.function(block, writer);
             }
-            try formatTemplate(html_template.footer, doc.info, writer);
-        }
-        {
-            try gmi_dir.makePath(dir_path);
-            var dir = try gmi_dir.openDir(dir_path, .{});
-            defer dir.close();
-            const out_filename = try std.mem.concat(
-                &arena.allocator,
-                u8,
-                &[_][]const u8{ filename, ".gmi" },
-            );
-            const out_file = try dir.createFile(
-                out_filename,
-                .{ .truncate = true },
-            );
-            defer out_file.close();
-            const writer = out_file.writer();
-            try formatTemplate(gmi_template.header, doc.info, writer);
-            for (doc.blocks) |block| {
-                try formatBlockGmi(block, writer);
-            }
-            try formatTemplate(gmi_template.footer, doc.info, writer);
+            try formatTemplate(fmt_options.template.footer, doc.info, writer);
         }
     }
 }
