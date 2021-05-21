@@ -1481,14 +1481,8 @@ fn formatTemplate(
                 }
             },
             .back_text, .parent_name => {
-                if (dirname) |dir| {
-                    if (std.mem.eql(u8, info.filename, "index")) {
-                        try writer.writeAll("return home");
-                    } else {
-                        try writer.print("{s} index", .{dir});
-                    }
-                } else if (!std.mem.eql(u8, info.filename, "index")) {
-                    try writer.writeAll("return home");
+                if (parent_name) |name| {
+                    try writer.writeAll(name);
                 }
             },
         },
