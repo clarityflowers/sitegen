@@ -294,9 +294,7 @@ fn renderFile(options: RenderOptions, targets: RenderTargets, filename: []const 
 // ---- MODELS ----
 
 /// The possible rendering targets
-const Ext = enum {
-    html, gmi
-};
+const Ext = enum { html, gmi };
 
 /// A parsed document
 const Document = struct {
@@ -1209,7 +1207,7 @@ fn buildIndex(
     std.sort.sort(IndexEntry, pages.items, {}, sortFn);
     if (limit) |limit_val| {
         if (limit_val < pages.items.len) {
-            pages.shrink(limit_val);
+            pages.shrinkAndFree(limit_val);
         }
     }
     try formatIndexMarkup(stdout, pages.items);
