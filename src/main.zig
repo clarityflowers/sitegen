@@ -170,11 +170,9 @@ fn make(
     try cwd.makePath(args[index]);
     var out_dir = try cwd.openDir(args[index], .{});
     defer out_dir.close();
-    try out_dir.makePath("html");
-    try out_dir.makePath("gmi");
-    var html_dir = try out_dir.openDir("html", .{});
+    var html_dir = try out_dir.makeOpenPath("html", .{});
     defer html_dir.close();
-    var gmi_dir = try out_dir.openDir("gmi", .{});
+    var gmi_dir = try out_dir.makeOpenPath("gmi", .{});
     defer gmi_dir.close();
     index += 1;
     var site_dir = try cwd.openDir(
@@ -185,103 +183,111 @@ fn make(
     try site_dir.setAsCwd();
     defer site_dir.close();
     const render_options: RenderOptions = .{
-        .site_dir = &site_dir,
-        .html = .{
-            .dir = &html_dir,
-            .template = &html_template,
-        },
-        .gmi = .{
-            .dir = &gmi_dir,
-            .template = &gmi_template,
-        },
+        .html_template = &html_template,
+        .gmi_template = &gmi_template,
         .allocator = allocator,
     };
-    try renderDir(
-        render_options,
-        null,
-    );
-    var it = site_dir.iterate();
-    while (try it.next()) |item| {
-        if (item.kind != .Directory) continue;
-        try renderDir(
-            render_options,
-            item.name,
-        );
-    }
+    const targets: RenderTargets = .{
+        .dirname = null,
+        .src = &site_dir,
+        .gmi = &gmi_dir,
+        .html = &html_dir,
+    };
+    try renderDir(render_options, targets, 0);
 
     log.info("Done!", .{});
 }
 
 pub const RenderOptions = struct {
-    site_dir: *std.fs.Dir,
-    html: RenderFormatOptions,
-    gmi: RenderFormatOptions,
+    html_template: *const Template,
+    gmi_template: *const Template,
     allocator: *std.mem.Allocator,
 };
-pub const RenderFormatOptions = struct {
-    dir: *std.fs.Dir,
-    template: *const Template,
+pub const RenderTargets = struct {
+    dirname: ?[]const u8,
+    src: *std.fs.Dir,
+    gmi: *std.fs.Dir,
+    html: *std.fs.Dir,
 };
 
-/// Iterate over all files in a directory and render their output for each target
-fn renderDir(
-    options: RenderOptions,
-    dirname: ?[]const u8,
-) !void {
-    const dir_path = dirname orelse ".";
-    var src_dir = try options.site_dir.openDir(
-        dir_path,
-        .{ .iterate = true },
-    );
-    try src_dir.setAsCwd();
-    defer src_dir.close();
-    var it = src_dir.iterate();
-    while (try it.next()) |item| {
-        if (item.kind != .File) continue;
-        if (!std.mem.endsWith(u8, item.name, ".txt")) continue;
-        var arena = std.heap.ArenaAllocator.init(options.allocator);
-        const filename = item.name[0 .. item.name.len - 4];
-        defer arena.deinit();
-        const src_file = try src_dir.openFile(item.name, .{});
-        defer src_file.close();
-        const lines = try readLines(src_file.reader(), &arena.allocator);
+const RenderError = ParseError || ParseInfoError || std.fs.File.OpenError || std.fs.Dir.OpenError ||
+    error{ LinkQuotaExceeded, ReadOnlyFileSystem };
 
-        log.info("Generating {s}/{s}", .{
-            dir_path,
-            filename,
-        });
-        const doc = try parseDocument(
-            lines,
-            filename,
-            dirname,
+/// Iterate over all files in a directory and render their output for each target
+fn renderDir(options: RenderOptions, targets: RenderTargets, depth: usize) RenderError!void {
+    try targets.src.setAsCwd();
+    var it = targets.src.iterate();
+    while (try it.next()) |item| switch (item.kind) {
+        .File => {
+            const whitespace = Whitespace{ .size = 2 * depth };
+            log.info("{}{s}", .{ whitespace, item.name });
+            try renderFile(
+                options,
+                targets,
+                item.name,
+            );
+        },
+        .Directory => {
+            var src_subdir = try targets.src.openDir(item.name, .{ .iterate = true });
+            try src_subdir.setAsCwd();
+            defer targets.src.setAsCwd() catch unreachable;
+            defer src_subdir.close();
+            var html_subdir = try targets.html.makeOpenPath(item.name, .{});
+            defer html_subdir.close();
+            var gmi_subdir = try targets.gmi.makeOpenPath(item.name, .{});
+            defer gmi_subdir.close();
+            const whitespace = Whitespace{ .size = 2 * depth };
+            log.info("{}{s}:", .{ whitespace, item.name });
+            const subtargets = RenderTargets{
+                .dirname = item.name,
+                .html = &html_subdir,
+                .gmi = &gmi_subdir,
+                .src = &src_subdir,
+            };
+            try renderDir(options, subtargets, depth + 1);
+        },
+        else => {},
+    };
+}
+
+fn renderFile(options: RenderOptions, targets: RenderTargets, filename: []const u8) RenderError!void {
+    if (!std.mem.endsWith(u8, filename, ".txt")) return;
+    var arena = std.heap.ArenaAllocator.init(options.allocator);
+    const filename_no_ext = filename[0 .. filename.len - 4];
+    defer arena.deinit();
+    const src_file = try targets.src.openFile(filename, .{});
+    defer src_file.close();
+    const lines = try readLines(src_file.reader(), &arena.allocator);
+
+    const doc = try parseDocument(
+        lines,
+        filename_no_ext,
+        targets.dirname,
+        &arena.allocator,
+    );
+    if (doc.info.private and !include_private) return;
+    inline for (@typeInfo(Ext).Enum.fields) |field| {
+        comptime const ext = @field(Ext, field.name);
+        const dir = @field(targets, field.name);
+        const template = @field(options, field.name ++ "_template");
+        const out_filename = try std.mem.concat(
             &arena.allocator,
+            u8,
+            &[_][]const u8{ filename_no_ext, "." ++ field.name },
         );
-        if (doc.info.private and !include_private) continue;
-        inline for (.{
-            .{ .field = "html", .function = formatBlockHtml },
-            .{ .field = "gmi", .function = formatBlockGmi },
-        }) |fmt| {
-            const fmt_options = @field(options, fmt.field);
-            try fmt_options.dir.makePath(dir_path);
-            var dir = try fmt_options.dir.openDir(dir_path, .{});
-            defer dir.close();
-            const out_filename = try std.mem.concat(
-                &arena.allocator,
-                u8,
-                &[_][]const u8{ filename, ".html" },
-            );
-            const out_file = try dir.createFile(
-                out_filename,
-                .{ .truncate = true },
-            );
-            defer out_file.close();
-            const writer = out_file.writer();
-            try formatTemplate(fmt_options.template.header, doc.info, writer);
-            for (doc.blocks) |block| {
-                try fmt.function(block, writer);
-            }
-            try formatTemplate(fmt_options.template.footer, doc.info, writer);
-        }
+        defer arena.allocator.free(out_filename);
+        const out_file = try dir.createFile(
+            out_filename,
+            .{ .truncate = true },
+        );
+        defer out_file.close();
+        const writer = out_file.writer();
+        try formatTemplate(template.header, doc.info, writer);
+        for (doc.blocks) |block| switch (ext) {
+            .html => try formatBlockHtml(block, writer),
+            .gmi => try formatBlockGmi(block, writer),
+        };
+        try formatTemplate(template.footer, doc.info, writer);
     }
 }
 
@@ -412,6 +418,9 @@ const ParseError = error{
     std.process.GetEnvVarOwnedError || std.fs.File.ReadError ||
     std.fs.File.WriteError || std.ChildProcess.SpawnError;
 
+const ParseInfoError = std.mem.Allocator.Error ||
+    error{ NoInfo, NoCreatedDate, UnexpectedInfo, FailedToMatchLiteral, EndOfStream, InvalidDay };
+
 fn ParseResult(comptime Type: type) type {
     return struct {
         data: Type,
@@ -432,7 +441,7 @@ fn parseInfo(
     filename: []const u8,
     dirname: ?[]const u8,
     allocator: *std.mem.Allocator,
-) !ParseResult(Info) {
+) ParseInfoError!ParseResult(Info) {
     if (lines.len == 0) return error.NoInfo;
     const title = lines[0];
     var created: ?Date = null;
@@ -1160,7 +1169,7 @@ fn buildIndex(
             }
             break :blk lines.toOwnedSlice();
         };
-        log.debug("Adding {s} to index", .{filename});
+        // log.debug("Adding {s} to index", .{filename});
         var info = (try parseInfo(
             lines,
             filename[0 .. filename.len - 4],
@@ -1569,3 +1578,11 @@ fn parseLiteral(
     if (!std.mem.startsWith(u8, text[start..], literal)) return null;
     return start + literal.len;
 }
+
+const Whitespace = struct {
+    size: usize,
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        var i: usize = 0;
+        while (i < self.size) : (i += 1) try writer.writeByte(' ');
+    }
+};
