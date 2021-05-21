@@ -193,7 +193,7 @@ fn make(
         .gmi = &gmi_dir,
         .html = &html_dir,
     };
-    try renderDir(render_options, targets, 0);
+    try renderDir(render_options, targets, null, 0);
 
     log.info("Done!", .{});
 }
@@ -211,12 +211,29 @@ pub const RenderTargets = struct {
 };
 
 const RenderError = ParseError || ParseInfoError || std.fs.File.OpenError || std.fs.Dir.OpenError ||
-    error{ LinkQuotaExceeded, ReadOnlyFileSystem };
+    error{ LinkQuotaExceeded, ReadOnlyFileSystem, StreamTooLong };
 
 /// Iterate over all files in a directory and render their output for each target
-fn renderDir(options: RenderOptions, targets: RenderTargets, depth: usize) RenderError!void {
+fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]const u8, depth: usize) RenderError!void {
     try targets.src.setAsCwd();
     var it = targets.src.iterate();
+
+    const index_title = blk: {
+        const index = targets.src.openFile("index.txt", .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.debug.panic("No index file found in {s}.", .{targets.dirname});
+            },
+            else => |other_err| return other_err,
+        };
+        defer index.close();
+        break :blk try index.reader().readUntilDelimiterAlloc(
+            options.allocator,
+            '\n',
+            1024 * 1024,
+        );
+    };
+    defer options.allocator.free(index_title);
+
     while (try it.next()) |item| switch (item.kind) {
         .File => {
             const whitespace = Whitespace{ .size = 2 * depth };
@@ -224,6 +241,7 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, depth: usize) Rende
             try renderFile(
                 options,
                 targets,
+                if (std.mem.eql(u8, item.name, "index.txt")) parent_title else index_title,
                 item.name,
             );
         },
@@ -244,13 +262,13 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, depth: usize) Rende
                 .gmi = &gmi_subdir,
                 .src = &src_subdir,
             };
-            try renderDir(options, subtargets, depth + 1);
+            try renderDir(options, subtargets, index_title, depth + 1);
         },
         else => {},
     };
 }
 
-fn renderFile(options: RenderOptions, targets: RenderTargets, filename: []const u8) RenderError!void {
+fn renderFile(options: RenderOptions, targets: RenderTargets, parent_name: ?[]const u8, filename: []const u8) RenderError!void {
     if (!std.mem.endsWith(u8, filename, ".txt")) return;
     var arena = std.heap.ArenaAllocator.init(options.allocator);
     const filename_no_ext = filename[0 .. filename.len - 4];
@@ -262,7 +280,6 @@ fn renderFile(options: RenderOptions, targets: RenderTargets, filename: []const 
     const doc = try parseDocument(
         lines,
         filename_no_ext,
-        targets.dirname,
         &arena.allocator,
     );
     if (doc.info.private and !include_private) return;
@@ -282,12 +299,12 @@ fn renderFile(options: RenderOptions, targets: RenderTargets, filename: []const 
         );
         defer out_file.close();
         const writer = out_file.writer();
-        try formatTemplate(template.header, doc.info, writer);
+        try formatTemplate(template.header, doc.info, targets.dirname, parent_name, writer);
         for (doc.blocks) |block| switch (ext) {
             .html => try formatBlockHtml(block, writer),
             .gmi => try formatBlockGmi(block, writer),
         };
-        try formatTemplate(template.footer, doc.info, writer);
+        try formatTemplate(template.footer, doc.info, targets.dirname, parent_name, writer);
     }
 }
 
@@ -305,7 +322,6 @@ const Document = struct {
 /// The metadata at the top of the document
 const Info = struct {
     filename: []const u8,
-    dir: ?[]const u8,
     title: []const u8,
     created: Date,
     changes: []const Change,
@@ -377,14 +393,13 @@ const Anchor = struct {
 /// it returns null.
 /// What I like about this is that we always have the context of the current line
 /// number close on hand so that if we need to put out helpful log messages, we
-/// can, and it's easy to right "speculative parsers" that go along doing their
+/// can, and it's easy to write "speculative parsers" that go along doing their
 /// to parse a format, but can "rewind" harmlessly if something goes wrong.
 /// In general, this also means that errors don't really happen, because if you
 /// mistype something it'll usually just fall back to raw text.
 fn parseDocument(
     lines: []const []const u8,
     path: []const u8,
-    dirname: ?[]const u8,
     allocator: *std.mem.Allocator,
 ) !Document {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -393,7 +408,7 @@ fn parseDocument(
     var errarena = std.heap.ArenaAllocator.init(allocator);
     errdefer errarena.deinit();
 
-    const info_res = try parseInfo(lines, path, dirname, allocator);
+    const info_res = try parseInfo(lines, path, allocator);
     const blocks = try parseBlocks(
         lines,
         info_res.new_pos + 1,
@@ -437,7 +452,6 @@ fn ok(data: anytype, new_pos: usize) ParseResult(@TypeOf(data)) {
 fn parseInfo(
     lines: []const []const u8,
     filename: []const u8,
-    dirname: ?[]const u8,
     allocator: *std.mem.Allocator,
 ) ParseInfoError!ParseResult(Info) {
     if (lines.len == 0) return error.NoInfo;
@@ -479,7 +493,6 @@ fn parseInfo(
         .changes = changes.toOwnedSlice(),
         .private = private,
         .unlisted = unlisted,
-        .dir = dirname,
     }, line);
 }
 
@@ -1171,7 +1184,6 @@ fn buildIndex(
         var info = (try parseInfo(
             lines,
             filename[0 .. filename.len - 4],
-            std.fs.path.dirname(filename),
             allocator,
         )).data;
         defer allocator.free(info.changes);
@@ -1255,6 +1267,8 @@ const TemplateVariableName = enum {
     updated,
     back_text,
     back,
+    parent_name,
+    parent,
 };
 
 const TemplateVariable = struct {
@@ -1425,6 +1439,8 @@ fn parseTemplateVariable(
 fn formatTemplate(
     template: []const TemplateNode,
     info: Info,
+    dirname: ?[]const u8,
+    parent_name: ?[]const u8,
     writer: anytype,
 ) @TypeOf(writer).Error!void {
     for (template) |node| switch (node) {
@@ -1446,17 +1462,17 @@ fn formatTemplate(
             },
             .title => try writer.writeAll(info.title),
             .file => try writer.writeAll(info.filename),
-            .dir => if (info.dir) |dir| try writer.writeAll(dir),
-            .back => {
+            .dir => if (dirname) |dir| try writer.writeAll(dir),
+            .back, .parent => {
                 try writer.writeByte('.');
-                if (info.dir) |dir| {
+                if (dirname) |dir| {
                     if (std.mem.eql(u8, info.filename, "index")) {
                         try writer.writeByte('.');
                     }
                 }
             },
-            .back_text => {
-                if (info.dir) |dir| {
+            .back_text, .parent_name => {
+                if (dirname) |dir| {
                     if (std.mem.eql(u8, info.filename, "index")) {
                         try writer.writeAll("return home");
                     } else {
@@ -1470,15 +1486,13 @@ fn formatTemplate(
         .conditional => |conditional| {
             if (switch (conditional.name) {
                 .written, .title, .file, .back_text => true,
-                .dir => info.dir != null,
-                .back => info.dir != null or !std.mem.eql(
-                    u8,
-                    info.filename,
-                    "index",
-                ),
+                .dir => dirname != null,
+                .back, .parent => dirname != null or
+                    !std.mem.eql(u8, info.filename, "index"),
                 .updated => info.changes.len > 0,
+                .parent_name => parent_name != null,
             }) {
-                try formatTemplate(conditional.output, info, writer);
+                try formatTemplate(conditional.output, info, dirname, parent_name, writer);
             }
         },
     };
