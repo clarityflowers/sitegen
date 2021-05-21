@@ -366,6 +366,7 @@ const Link = struct {
     url: []const u8,
     text: ?[]const u8 = null,
     auto_ext: bool = false,
+    hash: ?[]const u8 = null,
 };
 
 /// Inline formatting. Pretty much ignored entirely by gemini.
@@ -701,19 +702,23 @@ fn parseLink(line: []const u8) !?Link {
         url_start,
         " ",
     ) orelse return null;
+    const hash_start = std.mem.indexOfPos(u8, line[0..url_end], url_start, "#");
+    const hash = if (hash_start) |start| line[start + 1 .. url_end] else null;
     const text = line[url_end + 1 ..];
-    const url = line[url_start..url_end];
+    const url = line[url_start .. hash_start orelse url_end];
 
     if (std.mem.endsWith(u8, url, ".*")) {
         return Link{
             .url = url[0 .. url.len - 2],
             .text = text,
             .auto_ext = true,
+            .hash = hash,
         };
     } else {
         return Link{
             .url = url,
             .text = text,
+            .hash = hash,
         };
     }
 }
@@ -891,11 +896,15 @@ fn formatBlockHtml(
             else => {},
         },
         .link => |link| {
+            log.debug("Link {s} {s} {s}", .{ link.url, link.hash, link.text });
             const text = HtmlText.init(link.text orelse link.url);
             const url = HtmlText.init(link.url);
             try writer.print("<a href=\"{s}", .{url});
             if (link.auto_ext) {
                 try writer.writeAll(".html");
+            }
+            if (link.hash) |hash| {
+                try writer.print("#{s}", .{hash});
             }
             try writer.print("\">{s}</a>\n", .{text});
         },
