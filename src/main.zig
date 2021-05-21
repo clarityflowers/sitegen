@@ -1133,7 +1133,7 @@ fn buildIndex(
             arg_i += 1;
             break;
         } else if (std.mem.startsWith(u8, arg, "-")) {
-            log.alert("Unknown argument {}", .{arg});
+            log.alert("Unknown argument {s}", .{arg});
             return error.BadArgs;
         } else break;
     }
