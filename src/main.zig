@@ -34,7 +34,14 @@ pub fn log(
 ) void {
     const held = std.debug.getStderrMutex().acquire();
     defer held.release();
-    nosuspend std.io.getStdErr().writer().print(format ++ "\n", args) catch return;
+    const stderr = std.io.getStdErr().writer();
+    comptime const color: []const u8 = switch (message_level) {
+        .emerg, .alert, .crit, .err => "\x1B[1;91m", // red
+        .warn => "\x1B[1;93m", // yellow
+        else => "",
+    };
+    comptime const reset = if (color.len > 0) "\x1B[0m" else "";
+    nosuspend stderr.print(color ++ format ++ "\n" ++ reset, args) catch return;
 }
 
 pub fn main() u8 {
@@ -473,7 +480,7 @@ fn parseInfo(
             unlisted = true;
         } else {
             logger.alert("Could not parse info on line {}:", .{line});
-            logger.alert("{s}", .{lines[line]});
+            logger.info("{d}: {s}", .{ line, lines[line] });
             return error.UnexpectedInfo;
         }
     }
