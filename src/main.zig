@@ -7,31 +7,49 @@
 /// - parsing     reading source documents into the models
 /// - formatting  writing the models in the target format
 /// - indexing    formatting lists of documents
+/// - templates   rendering documents into templates
 /// - utils       common functions that I didn't have another place for
 ///
 /// If you want to add new features, you'll need to add the new block/span type
 /// to the union, add the appropriate parser in the "parsing" section and hook it /// into the parsing flow. Then, in the formatting section, add handlers for your
 /// new union fields for both targets
 ///
-/// If you want to change the templates documents render into, that's in
-/// formatHtml() and formatGmi().
-///
 const std = @import("std");
-const log = std.log.scoped(.website);
+const logger = std.log.scoped(.website);
 const Date = @import("zig-date/src/main.zig").Date;
 
 pub const log_level = if (std.builtin.mode == .Debug)
-    std.log.Level.debug
+    std.logger.Level.debug
 else
     std.log.Level.info;
 /// Global variables aren't too hard to keep track of when you only have one file.
 var include_private = false;
 var env_map: std.BufMap = undefined;
 
+pub fn log(
+    comptime message_level: std.log.Level,
+    comptime scope: @Type(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const held = std.debug.getStderrMutex().acquire();
+    defer held.release();
+    nosuspend std.io.getStdErr().writer().print(format ++ "\n", args) catch return;
+}
+
+pub fn main() u8 {
+    mainWrapped() catch |err| {
+        if (std.builtin.mode == .Debug) {
+            std.debug.warn("{}{s}\n", .{ @errorReturnTrace(), @errorName(err) });
+        } else return @intCast(u8, @errorToInt(err)) + 1;
+    };
+    return 0;
+}
+
 /// Entry point for the application
-pub fn main() anyerror!void {
+fn mainWrapped() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer if (gpa.deinit()) log.debug("Detected memory leak.", .{});
+    defer if (gpa.deinit()) logger.debug("Detected memory leak.", .{});
 
     env_map = try std.process.getEnvMap(&gpa.allocator);
     defer env_map.deinit();
@@ -72,7 +90,7 @@ pub fn main() anyerror!void {
     } else if (std.mem.eql(u8, args[1], "gmi_template")) {
         try stdout.writeAll(@embedFile("default_template.gmi"));
     } else {
-        log.alert("Unknown command {s}", .{args[1]});
+        logger.alert("Unknown command {s}", .{args[1]});
         try stdout.print(help, .{exe_name});
     }
 }
@@ -134,36 +152,18 @@ fn make(
             index += 1;
             break;
         } else if (std.mem.startsWith(u8, args[index], "-")) {
-            log.alert("Unknown arg {s}", .{args[index]});
+            logger.alert("Unknown arg {s}", .{args[index]});
             return error.BadArgs;
         } else {
             break;
         }
     }
-    const html_template = try parseTemplate(
-        if (html_template_file) |file|
-            try cwd.readFileAlloc(
-                &arena.allocator,
-                file,
-                1024 * 1024 * 1024,
-            )
-        else
-            @embedFile("default_template.html"),
-        &arena.allocator,
-    );
-    const gmi_template = try parseTemplate(
-        if (gmi_template_file) |file|
-            try cwd.readFileAlloc(
-                &arena.allocator,
-                file,
-                1024 * 1024 * 1024,
-            )
-        else
-            @embedFile("default_template.gmi"),
-        &arena.allocator,
-    );
+
+    const html_template = try getTemplate(&cwd, &arena.allocator, html_template_file, .html);
+    const gmi_template = try getTemplate(&cwd, &arena.allocator, html_template_file, .gmi);
+
     if (index >= args.len) {
-        log.alert("Missing <out_dir> argument.", .{});
+        logger.alert("Missing <out_dir> argument.", .{});
         try std.io.getStdOut().writer().print(usage, .{exe_name});
         return error.BadArgs;
     }
@@ -195,7 +195,7 @@ fn make(
     };
     try renderDir(render_options, targets, null, 0);
 
-    log.info("Done!", .{});
+    logger.info("Done!", .{});
 }
 
 pub const RenderOptions = struct {
@@ -235,7 +235,7 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
     while (try it.next()) |item| switch (item.kind) {
         .File => {
             const whitespace = Whitespace{ .size = 2 * depth };
-            log.info("{}{s}", .{ whitespace, item.name });
+            logger.info("{}{s}", .{ whitespace, item.name });
             try renderFile(
                 options,
                 targets,
@@ -253,6 +253,7 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
             var gmi_subdir = try targets.gmi.makeOpenPath(item.name, .{});
             defer gmi_subdir.close();
             const whitespace = Whitespace{ .size = 2 * depth };
+            logger.info("{}{s}:", .{ whitespace, item.name });
             const subdir_name = if (targets.dirname) |dirname|
                 try std.fs.path.join(options.allocator, &[_][]const u8{
                     dirname,
@@ -261,7 +262,6 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
             else
                 item.name;
             defer if (targets.dirname != null) options.allocator.free(subdir_name);
-            log.info("{}{s}:", .{ whitespace, item.name });
             const subtargets = RenderTargets{
                 .dirname = item.name,
                 .html = &html_subdir,
@@ -274,7 +274,12 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
     };
 }
 
-fn renderFile(options: RenderOptions, targets: RenderTargets, parent_name: ?[]const u8, filename: []const u8) RenderError!void {
+fn renderFile(
+    options: RenderOptions,
+    targets: RenderTargets,
+    parent_name: ?[]const u8,
+    filename: []const u8,
+) RenderError!void {
     if (!std.mem.endsWith(u8, filename, ".txt")) return;
     var arena = std.heap.ArenaAllocator.init(options.allocator);
     defer arena.deinit();
@@ -467,8 +472,8 @@ fn parseInfo(
         } else if (std.mem.eql(u8, lines[line], "Unlisted")) {
             unlisted = true;
         } else {
-            log.alert("Could not parse info on line {}:", .{line});
-            log.alert("{s}", .{lines[line]});
+            logger.alert("Could not parse info on line {}:", .{line});
+            logger.alert("{s}", .{lines[line]});
             return error.UnexpectedInfo;
         }
     }
@@ -485,7 +490,11 @@ fn parseInfo(
 /// So, we try to parse various block patterns, and if nothing matches, we
 /// add a line of paragraph text which will be "flushed out" as soon as something
 /// DOES match (or the end of the file).
-fn parseBlocks(lines: []const []const u8, start: usize, context: ParseContext) ParseError![]const Block {
+fn parseBlocks(
+    lines: []const []const u8,
+    start: usize,
+    context: ParseContext,
+) ParseError![]const Block {
     var index = start;
     var blocks = std.ArrayList(Block).init(context.allocator);
     var spans = std.ArrayList(Span).init(context.allocator);
@@ -547,7 +556,7 @@ fn parseCommand(
 
         try process.spawn();
         errdefer _ = process.kill() catch |err| {
-            log.warn("Had trouble cleaning up process: {}", .{err});
+            logger.warn("Had trouble cleaning up process: {}", .{err});
         };
         const writer = process.stdin.?.writer();
         for (res.data) |line| {
@@ -563,7 +572,7 @@ fn parseCommand(
         switch (try process.wait()) {
             .Exited => |status| {
                 if (status != 0) {
-                    log.alert("Process ended unexpectedly on line {d}", .{
+                    logger.alert("Process ended unexpectedly on line {d}", .{
                         res.new_pos,
                     });
                     return error.ProcessEndedUnexpectedly;
@@ -874,7 +883,7 @@ fn formatBlockHtml(
             else => {},
         },
         .link => |link| {
-            log.debug("Link {s} {s} {s}", .{ link.url, link.hash, link.text });
+            logger.debug("Link {s} {s} {s}", .{ link.url, link.hash, link.text });
             const text = HtmlText.init(link.text orelse link.url);
             const url = HtmlText.init(link.url);
             try writer.print("<a href=\"{s}", .{url});
@@ -1043,9 +1052,7 @@ fn formatBlockGmi(
         .image => |image| {
             try writer.print("=> {s} {s}\n", .{ image.source, image.title });
         },
-        .empty => {
-            try writer.writeAll("\n");
-        },
+        .empty => try writer.writeAll("\n"),
     }
 }
 
@@ -1118,7 +1125,7 @@ fn buildIndex(
         } else if (getOpt(arg, "limit", 'l')) {
             arg_i += 1;
             limit = std.fmt.parseInt(usize, args[arg_i], 10) catch {
-                log.alert("Limit value must be positive integer, got: {s}", .{
+                logger.alert("Limit value must be positive integer, got: {s}", .{
                     args[arg_i],
                 });
                 return error.BadArgs;
@@ -1131,12 +1138,12 @@ fn buildIndex(
             arg_i += 1;
             break;
         } else if (std.mem.startsWith(u8, arg, "-")) {
-            log.alert("Unknown argument {s}", .{arg});
+            logger.alert("Unknown argument {s}", .{arg});
             return error.BadArgs;
         } else break;
     }
     if (arg_i >= args.len) {
-        log.alert("Missing argument <file>.", .{});
+        logger.alert("Missing argument <file>.", .{});
         try stdout.print(usage, .{exe_name});
         return;
     }
@@ -1148,7 +1155,7 @@ fn buildIndex(
     var pages = std.ArrayList(IndexEntry).init(&arena.allocator);
     for (files.items) |filename| {
         if (!std.mem.endsWith(u8, filename, ".txt")) {
-            log.warn("Invalid index file {s}, files must be .txt. Skipping.", .{
+            logger.warn("Invalid index file {s}, files must be .txt. Skipping.", .{
                 filename,
             });
             continue;
@@ -1167,7 +1174,7 @@ fn buildIndex(
             }
             break :blk lines.toOwnedSlice();
         };
-        // log.debug("Adding {s} to index", .{filename});
+        // logger.debug("Adding {s} to index", .{filename});
         var info = (try parseInfo(lines, allocator)).data;
         defer allocator.free(info.changes);
         if (info.unlisted) continue;
@@ -1263,6 +1270,20 @@ const TemplateConditional = struct {
     name: TemplateVariableName,
     output: []const TemplateNode,
 };
+
+fn getTemplate(cwd: *std.fs.Dir, allocator: *std.mem.Allocator, template_file: ?[]const u8, comptime ext: Ext) !Template {
+    return try parseTemplate(
+        if (template_file) |file|
+            try cwd.readFileAlloc(
+                allocator,
+                file,
+                1024 * 1024 * 1024,
+            )
+        else
+            @embedFile("default_template." ++ @tagName(ext)),
+        allocator,
+    );
+}
 
 fn parseTemplate(text: []const u8, allocator: *std.mem.Allocator) !Template {
     var arena = std.heap.ArenaAllocator.init(allocator);
