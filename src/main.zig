@@ -253,6 +253,14 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
             var gmi_subdir = try targets.gmi.makeOpenPath(item.name, .{});
             defer gmi_subdir.close();
             const whitespace = Whitespace{ .size = 2 * depth };
+            const subdir_name = if (targets.dirname) |dirname|
+                try std.fs.path.join(options.allocator, &[_][]const u8{
+                    dirname,
+                    item.name,
+                })
+            else
+                item.name;
+            defer if (targets.dirname != null) options.allocator.free(subdir_name);
             log.info("{}{s}:", .{ whitespace, item.name });
             const subtargets = RenderTargets{
                 .dirname = item.name,
