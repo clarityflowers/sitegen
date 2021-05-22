@@ -220,9 +220,7 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
 
     const index_title = blk: {
         const index = targets.src.openFile("index.txt", .{}) catch |err| switch (err) {
-            error.FileNotFound => {
-                std.debug.panic("No index file found in {s}.", .{targets.dirname});
-            },
+            error.FileNotFound => std.debug.panic("No index file found in {s}.", .{targets.dirname}),
             else => |other_err| return other_err,
         };
         defer index.close();
@@ -271,17 +269,17 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
 fn renderFile(options: RenderOptions, targets: RenderTargets, parent_name: ?[]const u8, filename: []const u8) RenderError!void {
     if (!std.mem.endsWith(u8, filename, ".txt")) return;
     var arena = std.heap.ArenaAllocator.init(options.allocator);
-    const filename_no_ext = filename[0 .. filename.len - 4];
     defer arena.deinit();
+    const filename_no_ext = filename[0 .. filename.len - 4];
+    const file_info = FileInfo{
+        .name = filename_no_ext,
+        .dir = targets.dirname,
+        .parent_title = parent_name,
+    };
     const src_file = try targets.src.openFile(filename, .{});
     defer src_file.close();
     const lines = try readLines(src_file.reader(), &arena.allocator);
-
-    const doc = try parseDocument(
-        lines,
-        filename_no_ext,
-        &arena.allocator,
-    );
+    const doc = try parseDocument(lines, &arena.allocator, file_info);
     if (doc.info.private and !include_private) return;
     inline for (@typeInfo(Ext).Enum.fields) |field| {
         comptime const ext = @field(Ext, field.name);
@@ -299,12 +297,12 @@ fn renderFile(options: RenderOptions, targets: RenderTargets, parent_name: ?[]co
         );
         defer out_file.close();
         const writer = out_file.writer();
-        try formatTemplate(template.header, doc.info, targets.dirname, parent_name, writer);
+        try formatTemplate(template.header, doc.info, file_info, writer);
         for (doc.blocks) |block| switch (ext) {
             .html => try formatBlockHtml(block, writer),
             .gmi => try formatBlockGmi(block, writer),
         };
-        try formatTemplate(template.footer, doc.info, targets.dirname, parent_name, writer);
+        try formatTemplate(template.footer, doc.info, file_info, writer);
     }
 }
 
@@ -314,14 +312,10 @@ fn renderFile(options: RenderOptions, targets: RenderTargets, parent_name: ?[]co
 const Ext = enum { html, gmi };
 
 /// A parsed document
-const Document = struct {
-    blocks: []const Block,
-    info: Info,
-};
+const Document = struct { blocks: []const Block, info: Info };
 
 /// The metadata at the top of the document
 const Info = struct {
-    filename: []const u8,
     title: []const u8,
     created: Date,
     changes: []const Change,
@@ -329,10 +323,14 @@ const Info = struct {
     unlisted: bool = false,
 };
 
-const Change = struct {
-    date: Date,
-    what_changed: ?[]const u8 = null,
+const FileInfo = struct { name: []const u8, dir: ?[]const u8, parent_title: ?[]const u8 };
+const ParseContext = struct {
+    info: Info,
+    file: FileInfo,
+    allocator: *std.mem.Allocator,
 };
+
+const Change = struct { date: Date, what_changed: ?[]const u8 = null };
 
 /// A line-level block of text
 const Block = union(enum) {
@@ -348,18 +346,11 @@ const Block = union(enum) {
     image: Image,
 };
 
-const Image = struct {
-    source: []const u8,
-    alt: []const u8,
-    title: []const u8,
-};
+const Image = struct { source: []const u8, alt: []const u8, title: []const u8 };
 
 /// Text that should be copied as-is into the output IF the current rendering
 /// target matches the extension
-const Raw = struct {
-    ext: Ext,
-    lines: []const []const u8,
-};
+const Raw = struct { ext: Ext, lines: []const []const u8 };
 
 /// A line-level link
 const Link = struct {
@@ -369,7 +360,7 @@ const Link = struct {
     hash: ?[]const u8 = null,
 };
 
-/// Inline formatting. Pretty much ignored entirely by gemini.
+/// Inline formatting. Ignored entirely by gemini.
 const Span = union(enum) {
     text: []const u8,
     strong: []const Span,
@@ -379,10 +370,7 @@ const Span = union(enum) {
 };
 
 /// An inline link.
-const Anchor = struct {
-    url: []const u8,
-    text: []const Span,
-};
+const Anchor = struct { url: []const u8, text: []const Span };
 
 // ---- PARSING ----
 
@@ -400,22 +388,12 @@ const Anchor = struct {
 /// mistype something it'll usually just fall back to raw text.
 fn parseDocument(
     lines: []const []const u8,
-    path: []const u8,
     allocator: *std.mem.Allocator,
+    file: FileInfo,
 ) !Document {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var errarena = std.heap.ArenaAllocator.init(allocator);
-    errdefer errarena.deinit();
-
-    const info_res = try parseInfo(lines, path, allocator);
-    const blocks = try parseBlocks(
-        lines,
-        info_res.new_pos + 1,
-        &errarena.allocator,
-        info_res.data,
-    );
+    const info_res = try parseInfo(lines, allocator);
+    const context = ParseContext{ .file = file, .allocator = allocator, .info = info_res.data };
+    const blocks = try parseBlocks(lines, info_res.new_pos + 1, context);
 
     const result: Document = .{
         .blocks = blocks,
@@ -452,7 +430,6 @@ fn ok(data: anytype, new_pos: usize) ParseResult(@TypeOf(data)) {
 
 fn parseInfo(
     lines: []const []const u8,
-    filename: []const u8,
     allocator: *std.mem.Allocator,
 ) ParseInfoError!ParseResult(Info) {
     if (lines.len == 0) return error.NoInfo;
@@ -488,7 +465,6 @@ fn parseInfo(
         }
     }
     return ok(Info{
-        .filename = filename,
         .title = title,
         .created = created orelse return error.NoCreatedDate,
         .changes = changes.toOwnedSlice(),
@@ -501,29 +477,24 @@ fn parseInfo(
 /// So, we try to parse various block patterns, and if nothing matches, we
 /// add a line of paragraph text which will be "flushed out" as soon as something
 /// DOES match (or the end of the file).
-fn parseBlocks(
-    lines: []const []const u8,
-    start: usize,
-    allocator: *std.mem.Allocator,
-    info: Info,
-) ParseError![]const Block {
+fn parseBlocks(lines: []const []const u8, start: usize, context: ParseContext) ParseError![]const Block {
     var index = start;
-    var blocks = std.ArrayList(Block).init(allocator);
-    var spans = std.ArrayList(Span).init(allocator);
+    var blocks = std.ArrayList(Block).init(context.allocator);
+    var spans = std.ArrayList(Span).init(context.allocator);
     while (index < lines.len) {
-        if (try parseCommand(lines, index, allocator, info)) |res| {
+        if (try parseCommand(lines, index, context)) |res| {
             if (spans.items.len > 0) {
                 try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
             }
             try blocks.appendSlice(res.data);
             index = res.new_pos;
-        } else if (try parseBlock(lines, index, allocator)) |res| {
+        } else if (try parseBlock(lines, index, context.allocator)) |res| {
             if (spans.items.len > 0) {
                 try blocks.append(.{ .paragraph = spans.toOwnedSlice() });
             }
             try blocks.append(res.data);
             index = res.new_pos;
-        } else if (try parseSpans(lines[index], 0, null, null, allocator)) |res| {
+        } else if (try parseSpans(lines[index], 0, null, null, context.allocator)) |res| {
             index += 1;
             if (spans.items.len > 0) {
                 try spans.append(.{ .br = {} });
@@ -545,24 +516,23 @@ fn parseBlocks(
 fn parseCommand(
     lines: []const []const u8,
     start: usize,
-    allocator: *std.mem.Allocator,
-    info: Info,
+    context: ParseContext,
 ) !?ParseResult([]const Block) {
     if (try parsePrefixedLines(
         lines,
         start,
         ":",
-        allocator,
+        context.allocator,
     )) |res| {
-        defer allocator.free(res.data);
-        const shell = try std.process.getEnvVarOwned(allocator, "SHELL");
+        defer context.allocator.free(res.data);
+        const shell = try std.process.getEnvVarOwned(context.allocator, "SHELL");
 
         var process = try std.ChildProcess.init(
             &[_][]const u8{shell},
-            allocator,
+            context.allocator,
         );
         defer process.deinit();
-        try env_map.set("FILE", info.filename);
+        try env_map.set("FILE", context.file.name);
         process.env_map = &env_map;
         process.stdin_behavior = .Pipe;
         process.stdout_behavior = .Pipe;
@@ -580,7 +550,7 @@ fn parseCommand(
 
         const result_lines = try readLines(
             process.stdout.?.reader(),
-            allocator,
+            context.allocator,
         );
         switch (try process.wait()) {
             .Exited => |status| {
@@ -591,7 +561,7 @@ fn parseCommand(
                     return error.ProcessEndedUnexpectedly;
                 }
                 return ok(
-                    try parseBlocks(result_lines, 0, allocator, info),
+                    try parseBlocks(result_lines, 0, context),
                     res.new_pos,
                 );
             },
@@ -1190,11 +1160,7 @@ fn buildIndex(
             break :blk lines.toOwnedSlice();
         };
         // log.debug("Adding {s} to index", .{filename});
-        var info = (try parseInfo(
-            lines,
-            filename[0 .. filename.len - 4],
-            allocator,
-        )).data;
+        var info = (try parseInfo(lines, allocator)).data;
         defer allocator.free(info.changes);
         if (info.unlisted) continue;
         if (info.private and !include_private) continue;
@@ -1448,8 +1414,7 @@ fn parseTemplateVariable(
 fn formatTemplate(
     template: []const TemplateNode,
     info: Info,
-    dirname: ?[]const u8,
-    parent_name: ?[]const u8,
+    file: FileInfo,
     writer: anytype,
 ) @TypeOf(writer).Error!void {
     for (template) |node| switch (node) {
@@ -1470,18 +1435,18 @@ fn formatTemplate(
                 }
             },
             .title => try writer.writeAll(info.title),
-            .file => try writer.writeAll(info.filename),
-            .dir => if (dirname) |dir| try writer.writeAll(dir),
+            .file => try writer.writeAll(file.name),
+            .dir => if (file.dir) |dir| try writer.writeAll(dir),
             .back, .parent => {
                 try writer.writeByte('.');
-                if (dirname) |dir| {
-                    if (std.mem.eql(u8, info.filename, "index")) {
+                if (file.dir) |dir| {
+                    if (std.mem.eql(u8, file.name, "index")) {
                         try writer.writeByte('.');
                     }
                 }
             },
             .back_text, .parent_name => {
-                if (parent_name) |name| {
+                if (file.parent_title) |name| {
                     try writer.writeAll(name);
                 }
             },
@@ -1489,13 +1454,13 @@ fn formatTemplate(
         .conditional => |conditional| {
             if (switch (conditional.name) {
                 .written, .title, .file, .back_text => true,
-                .dir => dirname != null,
-                .back, .parent => dirname != null or
-                    !std.mem.eql(u8, info.filename, "index"),
+                .dir => file.dir != null,
+                .back, .parent => file.dir != null or
+                    !std.mem.eql(u8, file.name, "index"),
                 .updated => info.changes.len > 0,
-                .parent_name => parent_name != null,
+                .parent_name => file.parent_title != null,
             }) {
-                try formatTemplate(conditional.output, info, dirname, parent_name, writer);
+                try formatTemplate(conditional.output, info, file, writer);
             }
         },
     };
