@@ -19,12 +19,13 @@ const logger = std.log.scoped(.website);
 const Date = @import("zig-date/src/main.zig").Date;
 
 pub const log_level = if (std.builtin.mode == .Debug)
-    std.logger.Level.debug
+    std.log.Level.debug
 else
     std.log.Level.info;
 /// Global variables aren't too hard to keep track of when you only have one file.
 var include_private = false;
 var env_map: std.BufMap = undefined;
+var silent = false;
 
 pub fn log(
     comptime message_level: std.log.Level,
@@ -38,6 +39,8 @@ pub fn log(
     comptime const color: []const u8 = switch (message_level) {
         .emerg, .alert, .crit, .err => "\x1B[1;91m", // red
         .warn => "\x1B[1;93m", // yellow
+        .debug => "\x1B[36m", // blue
+        .info => "\x1B[37m", // gray
         else => "",
     };
     comptime const reset = if (color.len > 0) "\x1B[0m" else "";
@@ -115,8 +118,7 @@ fn make(
     var index: usize = 0;
     const usage =
         \\usage:
-        \\  {0s} make [-p] [--private] [--html <template>] [--gmi <template>]   
-        \\       [--] <out_dir> [<site_dir>]
+        \\  {0s} make [<options>] [--] <out_dir> [<site_dir>]
         \\  {0s} make [--help]
         \\
     ;
@@ -126,10 +128,11 @@ fn make(
         \\  out_dir   the output folder for all generated content
         \\  site_dir  the input folder for the site itself, defaults to cwd
         \\options:
-        \\  --help         show this text
-        \\  -p, --private  include private content in the build
+        \\  --help             show this text
+        \\  -p, --private      include private content in the build
         \\  --html <template>  render html output with the template
         \\  --gmi <template>  render gmi output with the given template
+        \\  -s, --silent       don't output filenames as they are rendered
     ;
     if (args.len == 0) {
         try std.io.getStdOut().writer().print(usage, .{exe_name});
@@ -155,6 +158,8 @@ fn make(
         } else if (getOpt(args[index], "gmi", null)) {
             index += 1;
             gmi_template_file = args[index];
+        } else if (getOpt(args[index], "silent", 's')) {
+            silent = true;
         } else if (getOpt(args[index], "", null)) {
             index += 1;
             break;
@@ -200,9 +205,7 @@ fn make(
         .gmi = &gmi_dir,
         .html = &html_dir,
     };
-    try renderDir(render_options, targets, null, 0);
-
-    logger.info("Done!", .{});
+    try renderDir(render_options, targets, null);
 }
 
 pub const RenderOptions = struct {
@@ -221,7 +224,7 @@ const RenderError = ParseError || ParseInfoError || std.fs.File.OpenError || std
     error{ LinkQuotaExceeded, ReadOnlyFileSystem, StreamTooLong };
 
 /// Iterate over all files in a directory and render their output for each target
-fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]const u8, depth: usize) RenderError!void {
+fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]const u8) RenderError!void {
     try targets.src.setAsCwd();
     var it = targets.src.iterate();
 
@@ -240,16 +243,12 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
     defer options.allocator.free(index_title);
 
     while (try it.next()) |item| switch (item.kind) {
-        .File => {
-            const whitespace = Whitespace{ .size = 2 * depth };
-            logger.info("{}{s}", .{ whitespace, item.name });
-            try renderFile(
-                options,
-                targets,
-                if (std.mem.eql(u8, item.name, "index.txt")) parent_title else index_title,
-                item.name,
-            );
-        },
+        .File => try renderFile(
+            options,
+            targets,
+            if (std.mem.eql(u8, item.name, "index.txt")) parent_title else index_title,
+            item.name,
+        ),
         .Directory => {
             var src_subdir = try targets.src.openDir(item.name, .{ .iterate = true });
             try src_subdir.setAsCwd();
@@ -259,8 +258,6 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
             defer html_subdir.close();
             var gmi_subdir = try targets.gmi.makeOpenPath(item.name, .{});
             defer gmi_subdir.close();
-            const whitespace = Whitespace{ .size = 2 * depth };
-            logger.info("{}{s}:", .{ whitespace, item.name });
             const subdir_name = if (targets.dirname) |dirname|
                 try std.fs.path.join(options.allocator, &[_][]const u8{
                     dirname,
@@ -275,7 +272,7 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
                 .gmi = &gmi_subdir,
                 .src = &src_subdir,
             };
-            try renderDir(options, subtargets, index_title, depth + 1);
+            try renderDir(options, subtargets, index_title);
         },
         else => {},
     };
@@ -301,6 +298,14 @@ fn renderFile(
     const lines = try readLines(src_file.reader(), &arena.allocator);
     const doc = try parseDocument(lines, &arena.allocator, file_info);
     if (doc.info.private and !include_private) return;
+    const stdout = std.io.getStdOut().writer();
+    if (!silent) {
+        if (targets.dirname) |dirname| {
+            try stdout.print("{s}{s}{s}\n", .{ dirname, std.fs.path.sep_str, filename_no_ext });
+        } else {
+            try stdout.print("{s}\n", .{filename_no_ext});
+        }
+    }
     inline for (@typeInfo(Ext).Enum.fields) |field| {
         comptime const ext = @field(Ext, field.name);
         const dir = @field(targets, field.name);
@@ -890,7 +895,6 @@ fn formatBlockHtml(
             else => {},
         },
         .link => |link| {
-            logger.debug("Link {s} {s} {s}", .{ link.url, link.hash, link.text });
             const text = HtmlText.init(link.text orelse link.url);
             const url = HtmlText.init(link.url);
             try writer.print("<a href=\"{s}", .{url});
@@ -1594,11 +1598,3 @@ fn parseLiteral(
     if (!std.mem.startsWith(u8, text[start..], literal)) return null;
     return start + literal.len;
 }
-
-const Whitespace = struct {
-    size: usize,
-    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        var i: usize = 0;
-        while (i < self.size) : (i += 1) try writer.writeByte(' ');
-    }
-};
