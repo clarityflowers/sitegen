@@ -267,7 +267,7 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
                 item.name;
             defer if (targets.dirname != null) options.allocator.free(subdir_name);
             const subtargets = RenderTargets{
-                .dirname = item.name,
+                .dirname = subdir_name,
                 .html = &html_subdir,
                 .gmi = &gmi_subdir,
                 .src = &src_subdir,
