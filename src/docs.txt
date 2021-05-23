@@ -1,5 +1,6 @@
 Site Generator
 Written 2021-02-04
+Using bash
 Updated 2021-02-06 Added a bunch of features
 Updated 2021-02-16 Blank lines are now handled literally in gemini
 Updated 2021-02-21 Rewrote to a more conventional documation format.
@@ -10,7 +11,7 @@ A tool for generating static html and gemtext pages from markdown-like source do
 
 => https://github.com/clarityflowers/sitegen Source code
 
-By keeping the functionality simple and the code structure straightforward, adding and removing features becomes an inviting task. Rather than building a library of common tools or writing extensions or plugins, I want to keep the scope small enough that new variations for kinds of websites could be copy & paste clones with custom tweaks.
+By keeping the functionality simple and the code structure straightforward, adding and removing features becomes an inviting task.
 
 : echo '  > sitegen --help'
 : echo '  '
@@ -70,6 +71,10 @@ You can also mark a page as private or unlisted
   Unlisted
 
 Private pages will only be generated if you include the "--private" option during generation. Unlisted pages will be generated, but won't show up during indexing.
+
+The "using" setting declares what program the file should use as its shell (defaulting to $SHELL).
+
+  Using bash
 
 ## Body
 
@@ -131,7 +136,7 @@ You can also run arbitrary commands with your shell and parse the output as form
   : echo "# Hello world
   : => hello.png Hello world!"
 
-This has pretty huge implications as it allows you to write "plugins" in any language that generate data without constraints. The shell is invoked with its working directory as the directory of the document file, and the "$FILE" environment variable is set to the name of the file (without the .txt extension.)
+The commands use the value set by the "using" info header, or otherwise default to "$SHELL". This has pretty huge implications as it allows you to write "plugins" in any language that generate data without constraints. The shell is invoked with its working directory as the directory of the document file, and the "$FILE" environment variable is set to the name of the file (without the .txt extension.)
 
 A pattern I find myself using fairly often (including in this document) is to pipe the result of commands into sed in order to format the output as a preformatted block. 
 
@@ -141,7 +146,7 @@ A pattern I find myself using fairly often (including in this document) is to pi
 
 For a complete example of a document, here is the source of the page you are currently reading:
 
-: sed 's/.*/  &/' {$FILE}.txt
+: sed 's/.*/  &/' ${FILE}.txt
 
 
 # Templates

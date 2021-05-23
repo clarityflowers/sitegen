@@ -346,6 +346,7 @@ const Info = struct {
     changes: []const Change,
     private: bool = false,
     unlisted: bool = false,
+    shell: ?[]const u8 = null,
 };
 
 const FileInfo = struct { name: []const u8, dir: ?[]const u8, parent_title: ?[]const u8 };
@@ -465,6 +466,7 @@ fn parseInfo(
     var line: usize = 1;
     var private = false;
     var unlisted = false;
+    var shell: ?[]const u8 = null;
     while (line < lines.len and lines[line].len > 0) : (line += 1) {
         if (parseLiteral(lines[line], 0, "Written ")) |index| {
             created = try Date.parse(lines[line][index..]);
@@ -483,6 +485,8 @@ fn parseInfo(
             private = true;
         } else if (std.mem.eql(u8, lines[line], "Unlisted")) {
             unlisted = true;
+        } else if (parseLiteral(lines[line], 0, "Using ")) |index| {
+            shell = lines[line][index..];
         } else {
             logger.alert("Could not parse info on line {}:", .{line});
             logger.info("{d}: {s}", .{ line, lines[line] });
@@ -495,6 +499,7 @@ fn parseInfo(
         .changes = changes.toOwnedSlice(),
         .private = private,
         .unlisted = unlisted,
+        .shell = shell,
     }, line);
 }
 
@@ -554,7 +559,8 @@ fn parseCommand(
         context.allocator,
     )) |res| {
         defer context.allocator.free(res.data);
-        const shell = try std.process.getEnvVarOwned(context.allocator, "SHELL");
+        const shell = context.info.shell orelse
+            try std.process.getEnvVarOwned(context.allocator, "SHELL");
 
         var process = try std.ChildProcess.init(
             &[_][]const u8{shell},
