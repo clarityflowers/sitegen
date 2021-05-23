@@ -228,9 +228,9 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
     try targets.src.setAsCwd();
     var it = targets.src.iterate();
 
-    const index_title = blk: {
+    const index_title: ?[]const u8 = blk: {
         const index = targets.src.openFile("index.txt", .{}) catch |err| switch (err) {
-            error.FileNotFound => std.debug.panic("No index file found in {s}.", .{targets.dirname}),
+            error.FileNotFound => break :blk null,
             else => |other_err| return other_err,
         };
         defer index.close();
@@ -240,7 +240,7 @@ fn renderDir(options: RenderOptions, targets: RenderTargets, parent_title: ?[]co
             1024 * 1024,
         );
     };
-    defer options.allocator.free(index_title);
+    defer if (index_title) |title| options.allocator.free(title);
 
     while (try it.next()) |item| switch (item.kind) {
         .File => try renderFile(
@@ -1165,12 +1165,8 @@ fn buildIndex(
     const cwd = std.fs.cwd();
     var pages = std.ArrayList(IndexEntry).init(&arena.allocator);
     for (files.items) |filename| {
-        if (!std.mem.endsWith(u8, filename, ".txt")) {
-            logger.warn("Invalid index file {s}, files must be .txt. Skipping.", .{
-                filename,
-            });
-            continue;
-        }
+        if (!std.mem.endsWith(u8, filename, ".txt")) continue;
+
         var file = try cwd.openFile(filename, .{});
         defer file.close();
 
