@@ -1164,13 +1164,9 @@ fn buildIndex(
         try stdout.print(usage, .{exe_name});
         return;
     }
-    var files = std.ArrayList([]const u8).init(&arena.allocator);
-    while (arg_i < args.len) : (arg_i += 1) {
-        try files.append(args[arg_i]);
-    }
     const cwd = std.fs.cwd();
     var pages = std.ArrayList(IndexEntry).init(&arena.allocator);
-    for (files.items) |filename| {
+    for (args[arg_i..]) |filename| {
         if (!std.mem.endsWith(u8, filename, ".txt")) continue;
 
         var file = try cwd.openFile(filename, .{});
