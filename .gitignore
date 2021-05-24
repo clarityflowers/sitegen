@@ -11,3 +11,5 @@ site/
 old/
 out/
 template.html
+zig-out/
+links
