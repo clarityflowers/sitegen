@@ -172,7 +172,7 @@ fn make(
     }
 
     const html_template = try getTemplate(&cwd, &arena.allocator, html_template_file, .html);
-    const gmi_template = try getTemplate(&cwd, &arena.allocator, html_template_file, .gmi);
+    const gmi_template = try getTemplate(&cwd, &arena.allocator, gmi_template_file, .gmi);
 
     if (index >= args.len) {
         logger.alert("Missing <out_dir> argument.", .{});
