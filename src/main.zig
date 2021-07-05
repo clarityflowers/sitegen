@@ -417,7 +417,7 @@ fn parseDocument(
     allocator: *std.mem.Allocator,
     file: FileInfo,
 ) !Document {
-    const info_res = try parseInfo(lines, allocator);
+    const info_res = try parseInfo(lines, file.name, allocator);
     const context = ParseContext{ .file = file, .allocator = allocator, .info = info_res.data };
     const blocks = try parseBlocks(lines, info_res.new_pos + 1, context);
 
@@ -456,9 +456,13 @@ fn ok(data: anytype, new_pos: usize) ParseResult(@TypeOf(data)) {
 
 fn parseInfo(
     lines: []const []const u8,
+    filename: []const u8,
     allocator: *std.mem.Allocator,
 ) ParseInfoError!ParseResult(Info) {
-    if (lines.len == 0) return error.NoInfo;
+    if (lines.len == 0) {
+        logger.alert("File {s} has no info", .{filename});
+        return error.NoInfo;
+    }
     const title = lines[0];
     var created: ?Date = null;
     var changes = std.ArrayList(Change).init(allocator);
@@ -495,7 +499,10 @@ fn parseInfo(
     }
     return ok(Info{
         .title = title,
-        .created = created orelse return error.NoCreatedDate,
+        .created = created orelse {
+            logger.alert("\"{s}\" (at {s}) has no written date", .{ title, filename });
+            return error.NoCreatedDate;
+        },
         .changes = changes.toOwnedSlice(),
         .private = private,
         .unlisted = unlisted,
@@ -1073,20 +1080,36 @@ fn formatBlockGmi(
     }
 }
 
-fn formatSpanGmi(
+fn formatSpanGmiInternal(
     span: Span,
     comptime br: []const u8,
     writer: anytype,
+    bold: bool,
 ) @TypeOf(writer).Error!void {
     switch (span) {
-        .text => |text| try writer.writeAll(text),
-        .emphasis,
-        .strong,
-        => |spans| for (spans) |sp| try formatSpanGmi(sp, "", writer),
+        .text => |text| {
+            if (bold) {
+                for (text) |char| {
+                    if (char >= 'a' and char <= 'z') {
+                        try writer.writeByte(char - ('a' - 'A'));
+                    } else {
+                        try writer.writeByte(char);
+                    }
+                }
+            } else {
+                try writer.writeAll(text);
+            }
+        },
+        .strong => |spans| for (spans) |sp| try formatSpanGmiInternal(sp, "", writer, true),
+        .emphasis => |spans| for (spans) |sp| try formatSpanGmiInternal(sp, "", writer, bold),
         .anchor => |anchor| for (anchor.text) |sp|
-            try formatSpanGmi(sp, "", writer),
+            try formatSpanGmiInternal(sp, "", writer, bold),
         .br => try writer.writeAll(br),
     }
+}
+
+fn formatSpanGmi(span: Span, comptime br: []const u8, writer: anytype) @TypeOf(writer).Error!void {
+    return formatSpanGmiInternal(span, br, writer, false);
 }
 
 // ---- INDEXING ----
@@ -1184,7 +1207,7 @@ fn buildIndex(
             break :blk lines.toOwnedSlice();
         };
         // logger.debug("Adding {s} to index", .{filename});
-        var info = (try parseInfo(lines, allocator)).data;
+        var info = (try parseInfo(lines, filename, allocator)).data;
         defer allocator.free(info.changes);
         if (info.unlisted) continue;
         if (info.private and !include_private) continue;
