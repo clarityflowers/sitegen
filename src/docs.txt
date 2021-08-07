@@ -198,15 +198,15 @@ Any non-format characters will be copied literally.
 
 You can render content conditionally by including a question mark inside variable escapes. All content inside (including more escapes) will only be rendered if that variable "exists". Some variables (like the title) will always exist, but others (like the updated date, back url, or directory) may need special care.
 
-  {{back?<a href="{{back}}">{{back_text}}</a>}}
+  {{parent?<a href="{{parent}}">{{parent_name}}</a>}}
 
 Note that
 
-  {{back?{{back}}}}
+  {{parent?{{parent}}}}
 
 is identical to
 
-  {{back}}
+  {{parent}}
 
 as empty variables will always be skipped over. 
 
