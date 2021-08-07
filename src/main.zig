@@ -1607,6 +1607,10 @@ fn readLines(
     var current_line = std.ArrayList(u8).init(allocator);
     while (try readLine(reader, &current_line)) {
         if (std.mem.startsWith(u8, current_line.items, "; ")) {
+            if (std.mem.endsWith(u8, current_line.items, "\r")) {
+                // Fuck it, we can handle CRLF lines, it's fine.
+                _ = current_line.pop();
+            }
             if (include_private) {
                 try lines.append(current_line.toOwnedSlice()[2..]);
             } else {

@@ -51,7 +51,7 @@ Indexing allows you to create lists of files inside of your site, which you can 
 
 # Document format
 
-Sitegen documents are UTF8-encoded .txt files, with newlines as line endings. The first few lines of the file are the title and metadata, broken by an empty line, followed by its contents.
+Sitegen documents are UTF8-encoded .txt files. The first few lines of the file are the title and metadata, broken by an empty line, followed by its contents.
 
 ## Info
 
