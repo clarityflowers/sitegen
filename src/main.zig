@@ -133,6 +133,7 @@ fn make(
         \\  --html <template>  render html output with the template
         \\  --gmi <template>  render gmi output with the given template
         \\  -s, --silent       don't output filenames as they are rendered
+        \\  -P, --path         appended to the PATH when running shell commands
     ;
     if (args.len == 0) {
         try std.io.getStdOut().writer().print(usage, .{exe_name});
@@ -160,6 +161,15 @@ fn make(
             gmi_template_file = args[index];
         } else if (getOpt(args[index], "silent", 's')) {
             silent = true;
+        } else if (getOpt(args[index], "path", 'P')) {
+            index += 1;
+            const parts: [][]const u8 = &[_][]const u8{
+                args[index],
+                env_map.get("PATH") orelse "",
+            };
+            const new_path = try std.mem.join(allocator, ":", parts);
+            defer allocator.free(new_path);
+            try env_map.set("PATH", new_path);
         } else if (getOpt(args[index], "", null)) {
             index += 1;
             break;
@@ -492,8 +502,7 @@ fn parseInfo(
         } else if (parseLiteral(lines[line], 0, "Using ")) |index| {
             shell = lines[line][index..];
         } else {
-            logger.alert("Could not parse info on line {}:", .{line});
-            logger.info("{d}: {s}", .{ line, lines[line] });
+            logger.alert("\"{s}\" (at {s}) has unexpected info \"{s}\" on line {d}.", .{ title, filename, lines[line], line + 1 });
             return error.UnexpectedInfo;
         }
     }
